@@ -215,7 +215,7 @@ async def batching():
     ad._pending_text_batches = {}; ad._pending_text_batch_tasks = {}
     ad._text_batch_delay_seconds = 0.2; ad._text_batch_split_delay_seconds = 0.2
     ad._flush_text_batch_orig = ad._flush_text_batch
-    mk = lambda who, text: types.SimpleNamespace(text=text, media_urls=[], media_types=[], source=types.SimpleNamespace(user_id=who, user_id_alt=None))
+    mk = lambda who, text: types.SimpleNamespace(text=text, media_urls=[], media_types=[], absorb_reply_expected=lambda ev: None, source=types.SimpleNamespace(user_id=who, user_id_alt=None))
     ad._enqueue_text_event(mk("972500000001@s.whatsapp.net", "from owner"))
     ad._enqueue_text_event(mk("972500000001@s.whatsapp.net", "owner again"))
     ad._enqueue_text_event(mk("100000000000001@lid", "from other"))
@@ -279,7 +279,7 @@ print("46 MEDIA: tags never reach chat text ->", len(calls) == 1 and "MEDIA:" no
 wctl({"collab_bots": [BOT], "collab_max_turns": 50})
 ad._collab_turns = {}; ad._collab_consec = {}
 res = [run(ad._build_message_event(d(BOT, "הרמס עדכון %d" % i))) is not None for i in range(8)]
-print("47 bots cannot reply to each other more than 5 times in a row ->", res[:5] == [True] * 5 and res[5:] == [False] * 3, res)
+print("47 bots cannot reply to each other more than 3 times in a row ->", res[:3] == [True] * 3 and res[3:] == [False] * 5, res)
 e = run(ad._build_message_event(d("100000000000003@lid", "חחח סתם הודעה לא מתויגת")))  # an unlisted human chatting: does NOT reset
 res2 = run(ad._build_message_event(d(BOT, "הרמס עוד אחד"))) is not None
 e = run(ad._build_message_event(d(OWNER + "@s.whatsapp.net", "היי, ממשיכים")))  # owner speaks (unaddressed): resets
@@ -391,3 +391,15 @@ print("57d list + stop ->", cid in cj(action="list")["result"], cj(action="stop"
 _t.sleep = _t_sleep
 tl._collab_pre_llm(session_id="cb2", user_message="[BOT COLLAB MODE: x]\nhi"); wctl({"collab_tools": "full"})
 print("57e a bot cannot start campaigns even with full tools ->", tl._collab_pre_tool(tool_name="whatsapp_campaign", args={"action": "start"}, session_id="cb2")["action"] == "block"); wctl({})
+
+# 58. acknowledgement / emoji-only messages never keep two bots talking
+wctl({"collab_bots": [BOT], "collab_max_turns": 50}); ad._collab_turns = {}; ad._collab_consec = {}
+acks = ["🤝", "👍", "💤", "נעצרתי 🤐", "תודה!", "ok", "קיבלתי 👍", "@100000000000004 סבבה"]
+dropped = [run(ad._build_message_event(d(BOT, a, mentionedIds=[BOT]))) is None for a in acks]
+real = [run(ad._build_message_event(d(BOT, t))) is not None for t in ("הרמס, הקוד אצלי. תבנה את הטאב", "הרמס יכול לשלוח?", "הרמס מה המחיר")]
+print("58 inbound acks from a bot dropped, real messages pass ->", all(dropped), real == [True, True, True], real)
+ad.__dict__.setdefault("_last_level", {})[G] = "collab"
+r1 = run(ad.send(G, "💤")); r2 = run(ad.send(G, "נעצרתי 🤐"))
+print("58b emoji/ack reply to a bot is suppressed ->", r1.success and r1.message_id is None and r2.success and r2.message_id is None)
+print("58c ack detector: questions and real text are not acks ->", not ad._is_ack_only("מה דעתך?") and not ad._is_ack_only("הקוד אצלי, בונה עכשיו טאב") and ad._is_ack_only("👍👍"))
+wctl({})

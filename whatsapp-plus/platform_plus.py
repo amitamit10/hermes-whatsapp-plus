@@ -29,7 +29,8 @@ A1_NEW = (
     "  });\n\n"
     "  try {\n"
     "    if (waPlus) waPlus.attach(sock, { app, messageQueue, messageStore, sendWithTimeout, ALLOWED_USERS, matchesAllowedUser, SESSION_DIR,\n"
-    "      jidNormalizedUser, normalizeWhatsAppId, getMessageContent, getContextInfo, extractBridgeEvent, downloadMediaMessage,\n"
+    "      jidNormalizedUser, normalizeWhatsAppId, getMessageContent, extractBridgeEvent, downloadMediaMessage,\n"
+    "      getContextInfo: (c) => { if (!c || typeof c !== 'object') return {}; for (const v of Object.values(c)) { if (v && typeof v === 'object' && v.contextInfo) return v.contextInfo; } return {}; },\n"
     "      IMAGE_CACHE_DIR, DOCUMENT_CACHE_DIR, AUDIO_CACHE_DIR, logger, getConnectionState: () => connectionState, getSock: () => sock });\n"
     "  } catch (e) { console.error('whatsapp-plus attach failed:', e.message); }\n\n"
     "  sock.ev.on('creds.update', () => { saveCreds(); lidToPhone = buildLidMap(); });\n"
@@ -64,7 +65,7 @@ def ensure_bridge(stock_dir: Path) -> bool:
     else:
         out = stock_js + "\n// whatsapp-plus: hook points not found - plain copy of the stock bridge\n"
         _alert("whatsapp-plus: the hook points in Hermes' stock WhatsApp bridge changed, so the plugin is running the STOCK bridge without its extras "
-               "(names, tags, reactions, loop brake, receipts, history extras). Update the two hook anchors in platform_plus.py.")
+               "(names, tags, reactions, loop brake, receipts, history extras). Ask Claude to update the two hooks in platform_plus.py.")
     BRIDGE_DIR.mkdir(parents=True, exist_ok=True)
     target = BRIDGE_DIR / "bridge.js"
     if not target.exists() or target.read_text() != out:
@@ -81,6 +82,8 @@ def ensure_bridge(stock_dir: Path) -> bool:
         link = BRIDGE_DIR / n
         if link.is_symlink() and os.readlink(link) == str(p):
             continue
+        if link.is_dir() and not link.is_symlink():
+            continue  # a real directory (e.g. node_modules installed by hand or by the launcher): leave it alone
         if link.is_symlink() or link.exists():
             link.unlink()
         link.symlink_to(p)
@@ -92,27 +95,41 @@ def ensure_bridge(stock_dir: Path) -> bool:
     return hooked
 
 
-def register_platform_plus(ctx) -> None:
-    from gateway.platform_registry import PlatformEntry, platform_registry
+def _stock_registration():
+    """The stock WhatsApp platform's own register() arguments, captured WITHOUT asking the platform registry.
 
-    stock = platform_registry.get("whatsapp")
-    if stock is None:
-        logger.warning("whatsapp-plus: the stock WhatsApp platform is not registered; leaving WhatsApp alone")
+    In current Hermes the stock platform is a lazily loaded plugin: a registry lookup from inside our own load
+    (a deadline worker that the discovery lock is waiting on) blocks on that lazy loader until the load deadline
+    kills this plugin. Running the stock register() against a recording context gives the same arguments."""
+    import importlib
+    stock_module = importlib.import_module("plugins.platforms.whatsapp.adapter")
+    captured = {}
+
+    class _Recorder:
+        def register_platform(self, **kw):
+            captured.update(kw)
+
+        def __getattr__(self, _name):
+            return lambda *a, **k: None
+
+    stock_module.register(_Recorder())
+    return stock_module, captured
+
+
+def register_platform_plus(ctx) -> None:
+    try:
+        stock_module, kw = _stock_registration()
+    except Exception as exc:
+        logger.warning("whatsapp-plus: could not read the stock WhatsApp registration (%s); leaving WhatsApp alone", exc)
         return
-    stock_module = sys.modules[stock.adapter_factory.__module__]
+    kw.pop("adapter_factory", None)
     from .adapter_plus import build_plus_class
     plus_cls = build_plus_class(stock_module.WhatsAppAdapter)
 
     def factory(config):
         return plus_cls(config)
 
-    skip = {"name", "label", "adapter_factory", "check_fn", "validate_config", "required_env", "install_hint", "source", "plugin_name"}
-    extra = {f.name: getattr(stock, f.name) for f in dataclasses.fields(PlatformEntry) if f.name not in skip}
-    ctx.register_platform(
-        name="whatsapp", label=stock.label, adapter_factory=factory, check_fn=stock.check_fn,
-        validate_config=stock.validate_config, required_env=list(stock.required_env or []),
-        install_hint=stock.install_hint, **extra,
-    )
+    ctx.register_platform(adapter_factory=factory, **kw)
     try:  # the paired session holds full account access: owner-only (#80137)
         home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
         for target, mode in ((home / "whatsapp" / "session", 0o700), (home / "whatsapp" / "bridge.log", 0o600)):

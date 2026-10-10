@@ -6,7 +6,7 @@ re-registers the platform through the plugin API, and generates its bridge from 
 insertions (so Hermes updates flow in on the next start). If the hook anchors ever change upstream, it falls back to the stock
 bridge and raises an alert instead of breaking.
 
-Developed and tested against Hermes `0.21.1` (Baileys 7.0.0-rc13 bridge), running natively under systemd. Use at your own risk -
+Developed against Hermes `0.21.1` and kept compatible with `main` as of October 2026 (the stock WhatsApp platform is a lazily loaded plugin there, so this plugin reads its registration without querying the registry) (Baileys 7.0.0-rc13 bridge), running natively under systemd. Use at your own risk -
 this automates a personal WhatsApp account, which WhatsApp can restrict if abused. The built-in limits exist for that reason.
 
 ## Highlights
@@ -49,7 +49,7 @@ Trust lists (`limited_users`, `collab_bots`, `bots`, `approved_groups`) are in `
 ## Tests
 
 `tests/t_plus.py` (adapter/tools; run inside the Hermes venv with the plugin installed) and `tests/t_ext.mjs` (bridge extension with a
-fake Baileys socket; `node tests/t_ext.mjs`). Identifiers in the tests are synthetic; both paths and the group id in the Hermes config
+fake Baileys socket; `node tests/t_ext.mjs`). Run the Python tests with `PYTHONPATH=<hermes source dir>`. Identifiers in the tests are synthetic; both paths and the group id in the Hermes config
 must match what the tests expect (see the top of each file).
 
 ## Notes

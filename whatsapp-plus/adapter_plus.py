@@ -231,6 +231,21 @@ class PlusMixin:
     def _group_sender_trusted(self, data) -> bool:
         return self._group_sender_level(data) is not None
 
+    _ACK_WORDS = frozenset(("ok", "okay", "k", "thanks", "thx", "ty", "got", "it", "done", "noted", "roger", "yes", "yep", "sure", "great", "cool",
+                            "nice", "good", "np", "waiting", "stopped", "muted", "תודה", "רבה", "אוקיי", "אוקי", "סבבה", "אחלה", "מעולה", "קיבלתי",
+                            "הבנתי", "נעצרתי", "יופי", "מצוין", "ברור", "בסדר", "טוב", "כן", "נשמע", "מחכה", "שומע", "לילה", "חחח", "הנה"))
+
+    @classmethod
+    def _is_ack_only(cls, text) -> bool:
+        """An emoji-only or 'ok / thanks / got it' style message: nothing to answer, so two bots must never keep trading them."""
+        t = re.sub(r"@\S+", "", str(text or "")).strip()
+        if not t or "?" in t:
+            return False
+        if not re.search(r"[A-Za-z\u0590-\u05FF0-9]", t):
+            return True  # only emoji / punctuation
+        words = re.findall(r"[A-Za-z\u0590-\u05FF']+", t.lower())
+        return len(words) <= 3 and all(w in cls._ACK_WORDS for w in words)
+
     _COLLAB_MAX_TURNS = 10     # bot-triggered replies allowed (default; override with collab_max_turns in wa_group_control.json) ...
     _COLLAB_WINDOW = 600       # ... per this many seconds, then bots are paused
     _COLLAB_PAUSE = 900
@@ -253,7 +268,7 @@ class PlusMixin:
         if kind == "collab":
             consec = self.__dict__.setdefault("_collab_consec", {})
             try:
-                cap = int(c.get("collab_max_consecutive") or 5)
+                cap = int(c.get("collab_max_consecutive") or 3)
             except Exception:
                 cap = 5
             if consec.get(chat_id, 0) >= cap:  # bots have been talking to each other with no human in between: stay quiet (context only)
@@ -408,6 +423,9 @@ class PlusMixin:
             return SendResult(success=True, message_id=None)
         if str(content or "").strip() in ("[NO_REPLY]", "NO_REPLY"):  # Hermes chose to stay silent
             from gateway.platforms.base import SendResult
+            return SendResult(success=True, message_id=None)
+        if str(chat_id).endswith("@g.us") and self.__dict__.get("_last_level", {}).get(str(chat_id)) == "collab" and self._is_ack_only(content):
+            from gateway.platforms.base import SendResult  # replying "ok"/an emoji to a bot only keeps the ping-pong alive
             return SendResult(success=True, message_id=None)
         if "MEDIA:" in str(content or ""):
             # internal media directives must never show up as visible text (they are delivered by the normal dispatch path, #43679)
@@ -651,6 +669,8 @@ class PlusMixin:
             level = None
             if data.get("isGroup"):
                 level = self._group_sender_level(data)
+                if level == "collab" and self._is_ack_only(data.get("body")):
+                    return None  # emoji / "ok" / "thanks" from a bot: stays in the history, never triggers a reply (loop breaker)
                 if level is None or (level == "collab" and not self._collab_gate(str(data.get("chatId") or ""))):
                     return None
                 if self._group_mode(data.get("chatId")) == "restricted":
@@ -667,6 +687,8 @@ class PlusMixin:
         event = await super()._build_message_event(data)
         if event is None:
             return None
+        if data.get("isGroup"):
+            self.__dict__.setdefault("_last_level", {})[str(data.get("chatId") or "")] = level
         try:
             text = event.text or ""
             if data.get("isGroup"):
