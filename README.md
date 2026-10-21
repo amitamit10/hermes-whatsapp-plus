@@ -31,6 +31,8 @@ this automates a personal WhatsApp account, which WhatsApp can restrict if abuse
 The `whatsapp_call_me` tool and an optional daemon in [`voice-call/`](voice-call/) let the bot answer your WhatsApp calls (or call you) with
 a live Gemini voice that shares your chat session. See [`voice-call/README.md`](voice-call/README.md).
 
+![Parallel lookups on a call](docs/lookup-parallel.svg)
+
 ## Install
 
 1. Hermes with WhatsApp working (`hermes whatsapp`, paired session).

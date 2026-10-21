@@ -54,7 +54,12 @@ try:
         pass
     try:
         prof = open(os.path.join(HOME, "memories", "USER.md"), encoding="utf-8").read()
-        out["profile"] = re.sub(r"\s*§\s*", "; ", prof).strip()[:1100]
+        out["profile"] = re.sub(r"\s*§\s*", "; ", prof).strip()[:2600]
+    except OSError:
+        pass
+    try:
+        mem = open(os.path.join(HOME, "memories", "MEMORY.md"), encoding="utf-8").read()
+        out["memory"] = re.sub(r"\s*§\s*", "; ", mem).strip()[:3600]
     except OSError:
         pass
 except Exception as exc:

@@ -1,0 +1,28 @@
+{
+  "_note": "Numbers only, measured by callerd on real calls (no conversation text). Add a row per call to regenerate the charts.",
+  "lookups": {
+    "call": "answered call, 3 lookups asked in one sentence",
+    "items": [
+      {"what": "weather", "started_s": 0.0, "ms": 18110},
+      {"what": "opening hours", "started_s": 0.0, "ms": 23814},
+      {"what": "shop checkout", "started_s": 0.0, "ms": 34498}
+    ]
+  },
+  "response_delay": [
+    {"call": "call-back, 46 s", "answers": 2, "avg_ms": 346, "slowest_ms": 682},
+    {"call": "answered, 98 s", "answers": 1, "avg_ms": 963, "slowest_ms": 963}
+  ],
+  "answer_attempts": {
+    "stages": ["ring", "offer accepted", "accept acknowledged", "call active", "audio recognised", "two-way talk"],
+    "attempts": [
+      {"label": "1", "stage": 1, "note": "Accept rejected (439)"},
+      {"label": "2", "stage": 1, "note": "address rerouted, 439 again"},
+      {"label": "3", "stage": 2, "note": "peer messages ignored"},
+      {"label": "4", "stage": 3, "note": "unknown audio stream"},
+      {"label": "5", "stage": 3, "note": "phone-number ID form, same"},
+      {"label": "6", "stage": 4, "note": "LID form: audio ok, never marked connected"},
+      {"label": "7", "stage": 4, "note": "silent: early event dropped the call"},
+      {"label": "8", "stage": 5, "note": "works"}
+    ]
+  }
+}

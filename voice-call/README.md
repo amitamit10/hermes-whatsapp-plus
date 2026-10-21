@@ -28,6 +28,28 @@ phone --WhatsApp call--> bot number --> callerd (linked device "callerd")
 - `patched-baileys-caller/` - the changed files of baileys-caller (see below). The WASM assets come from the upstream package.
 - `hermes-voice-call.service` - systemd unit (localhost only, runs as the hermes user).
 
+## Measured on real calls
+
+Charts are generated from `docs/call_metrics.json` (numbers only, no conversation text) by `docs/make_charts.py`; add a row per call and
+rerun it. The sample is small, so read them as honest first numbers, not benchmarks.
+
+![Parallel lookups on a call](../docs/lookup-parallel.svg)
+
+![How fast the voice answers](../docs/voice-response-delay.svg)
+
+![Getting Hermes to answer incoming calls](../docs/answering-attempts.svg)
+
+| Test call | Furthest stage | What was wrong |
+|---|---|---|
+| 1 | offer accepted | Accept rejected by WhatsApp (error 439): engine addressed the reply to the wrong ID form |
+| 2 | offer accepted | reply rerouted to the real address, 439 again: the `call-creator` inside the Accept had the same wrong form |
+| 3 | accept acknowledged | engine ignored the caller's later messages ("unknown user"): fed under a different ID form |
+| 4 | call active | caller's audio dropped as "unknown ssrc": the engine derived stream IDs from the wrong account ID |
+| 5 | call active | same with the phone-number form |
+| 6 | audio recognised | LID form (`<lid>:0@lid`) fixed the stream IDs, but the call was never marked connected |
+| 7 | audio recognised | silent: an early engine event was treated as a hang-up |
+| 8 | two-way talk | works |
+
 ## Settings
 
 `call_mode` in `state/wa_settings.json`: `answer` (the bot picks up when you call; falls back to calling you back if that fails) or
