@@ -37,7 +37,7 @@ const readVars = (file, names) => {
   try { for (const line of readFileSync(file, 'utf8').split('\n')) { const m = /^([A-Z0-9_]+)=(.*)$/.exec(line.trim()); if (m && names.includes(m[1])) out[m[1]] = m[2].replace(/^["']|["']$/g, ''); } } catch {}
   return out;
 };
-const liveConfig = () => readVars(LIVE_ENV, ['GEMINI_API_KEY', 'OPENAI_API_KEY', 'LIVE_PROVIDER', 'GEMINI_LIVE_MODEL', 'GEMINI_LIVE_VOICE', 'OPENAI_REALTIME_MODEL', 'OPENAI_REALTIME_VOICE', 'OWNER_NAME', 'OWNER_NUMBER', 'INPUT_LANGUAGES', 'END_SILENCE_MS', 'ASK_MAX_MS', 'MAX_CALL_MIN', 'SILENCE_HANGUP_S', 'ASK_LIMIT_MS']);
+const liveConfig = () => readVars(LIVE_ENV, ['GEMINI_API_KEY', 'OPENAI_API_KEY', 'LIVE_PROVIDER', 'GEMINI_LIVE_MODEL', 'GEMINI_LIVE_VOICE', 'OPENAI_REALTIME_MODEL', 'OPENAI_REALTIME_VOICE', 'OWNER_NAME', 'OWNER_NUMBER', 'INPUT_LANGUAGES', 'END_SILENCE_MS', 'ERRAND_PER_HOUR', 'ERRAND_MAX_MIN', 'ASK_MAX_MS', 'MAX_CALL_MIN', 'SILENCE_HANGUP_S', 'ASK_LIMIT_MS']);
 const hermesKey = () => readVars(process.env.HERMES_ENV_FILE || HOME + '/.env', ['API_SERVER_KEY']).API_SERVER_KEY || '';
 const waSettings = () => { try { return JSON.parse(readFileSync(HOME + '/state/wa_settings.json', 'utf8')); } catch { return {}; } };
 /** The only number that may talk to the live voice: OWNER_NUMBER from live.env. */
@@ -57,25 +57,28 @@ const TOOLS = [
 ];
 
 import { createMemory } from './mempalace-link.mjs';
+import { createErrand, errandInstructions, errandTools, errandLanguage } from './errand.mjs';
 const memory = process.env.MEMORY_SEARCH === '0' ? null : createMemory({ here: HERE, home: HOME, python: process.env.MEMPALACE_PYTHON || '/srv/media-ingest/hermes-service-home/hermes-agent-src/venv313/bin/python', log });
+const errandTimes = [];
 const link = createHermesLink({ here: HERE, home: HOME, hermesApi: HERMES_API, hermesKey, bridgeUrl: process.env.BRIDGE_URL || 'http://127.0.0.1:3000', log });
 const { getSessionInfo, askHermes, askHermesBounded, postCallSummary, instructionsFor } = link;
 
+const errand = createErrand({ log, home: HOME, link });
 let retries = 0;
 let client = null, state = 'idle', pairingCode = null, error = null, call = null, callInfo = null;
 const registered = () => existsSync(path.join(AUTH, 'creds.json')) && JSON.parse(readFileSync(path.join(AUTH, 'creds.json'), 'utf8')).registered === true;
 
 /** Connect the live voice (Gemini or OpenAI). Throws a readable error. */
-async function openLive(wantProvider, reason, direction, info) {
-  memory?.warm();   // start the memory helper now so the first recall question is fast
+async function openLive(wantProvider, reason, direction, info, override) {
+  if (!override) memory?.warm();   // start the memory helper now so the first recall question is fast
   const cfg = liveConfig();
   const provider = wantProvider || cfg.LIVE_PROVIDER || (cfg.GEMINI_API_KEY ? 'gemini' : cfg.OPENAI_API_KEY ? 'openai' : '');
   const apiKey = provider === 'openai' ? cfg.OPENAI_API_KEY : cfg.GEMINI_API_KEY;
   if (!apiKey) { const e = new Error('no live voice key: put GEMINI_API_KEY (or OPENAI_API_KEY) in ' + LIVE_ENV); e.status = 412; throw e; }
-  const live = makeLive(provider, { apiKey, instructions: instructionsFor(cfg, reason, direction, info), tools: TOOLS,
+  const live = makeLive(provider, { apiKey, instructions: override?.instructions ?? instructionsFor(cfg, reason, direction, info), tools: override?.tools ?? TOOLS,
     model: provider === 'openai' ? cfg.OPENAI_REALTIME_MODEL : cfg.GEMINI_LIVE_MODEL, voice: provider === 'openai' ? cfg.OPENAI_REALTIME_VOICE : cfg.GEMINI_LIVE_VOICE,
     silenceMs: Number(cfg.END_SILENCE_MS) || 300,
-    inputLanguages: cfg.INPUT_LANGUAGES ? cfg.INPUT_LANGUAGES.split(',').map((x) => x.trim()).filter(Boolean) : undefined });
+    inputLanguages: override ? override.inputLanguages : (cfg.INPUT_LANGUAGES ? cfg.INPUT_LANGUAGES.split(',').map((x) => x.trim()).filter(Boolean) : undefined) });
   try { await live.connect(); } catch (e) { const err = new Error('live voice failed: ' + String(e?.message || e).slice(0, 200)); err.status = 502; throw err; }
   return { live, provider };
 }
@@ -232,6 +235,33 @@ const server = http.createServer(async (req, res) => {
       void startClient(String(phone));
       for (let i = 0; i < 40 && !pairingCode && !error; i++) await new Promise((r) => setTimeout(r, 500));
       return json(res, pairingCode ? 200 : 500, { pairingCode, error });
+    }
+    if (req.method === 'POST' && url.pathname === '/errand') {
+      // Hermes phones a third party for the owner. Locked down: the voice gets only the brief (no memory, no Hermes tools); the call is recorded.
+      const b = await body(req);
+      if (state !== 'ready' || !client) return json(res, 409, { error: 'not ready: ' + state });
+      if (call) return json(res, 409, { error: 'a call is already active' });
+      const n = digits(b.to), purpose = String(b.purpose || '').trim();
+      if (n.length < 8 || n.length > 15) return json(res, 400, { error: 'to: digits with country code' });
+      if (purpose.length < 8) return json(res, 400, { error: 'purpose: say what the call is for' });
+      const cfg = liveConfig(), owner = digits(cfg.OWNER_NUMBER);
+      const perHour = Number(cfg.ERRAND_PER_HOUR) || 4, now = Date.now();
+      while (errandTimes.length && now - errandTimes[0] > 3600000) errandTimes.shift();
+      if (errandTimes.length >= perHour) return json(res, 429, { error: 'too many errand calls in the last hour (limit ' + perHour + ')' });
+      const lang = errandLanguage(b.language);
+      const brief = { name: String(b.name || '').slice(0, 60), purpose, mayShare: String(b.may_share || '').slice(0, 500), language: b.language, ownerName: cfg.OWNER_NAME || 'the owner' };
+      let opened = null;
+      try { opened = await openLive(null, '', 'out', null, { instructions: errandInstructions(brief), tools: errandTools(), inputLanguages: lang ? [lang.code] : undefined }); }
+      catch (e) { log('errand: live connect failed:', e.message); return json(res, e.status || 502, { error: e.message }); }
+      const ownerInfo = await getSessionInfo(owner);   // only used to report back into the owner's chat session
+      const maxMin = Number(cfg.ERRAND_MAX_MIN) || 6;
+      try { call = await client.call(n, { audioSource: 'live', durationMs: (maxMin + 2) * 60000 }); }
+      catch (e) { opened.live.close(); log('errand: call failed:', e.message); return json(res, 502, { error: String(e.message || e).slice(0, 160) }); }
+      errandTimes.push(now);
+      const active = call;
+      errand.wire(active, n, brief, opened, { setInfo: (i) => { callInfo = i; }, onEnd: () => { if (call === active) call = null; }, info: ownerInfo, owner, maxMs: maxMin * 60000 });
+      log('errand started to', n.slice(0, 3) + '\u2026' + n.slice(-2));
+      return json(res, 200, { ok: true, status: 'calling' });
     }
     if (req.method === 'POST' && url.pathname === '/call') {
       const { to, audioFile, durationMs, mode, reason, direction, provider: wantProvider } = await body(req);

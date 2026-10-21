@@ -391,8 +391,10 @@ export class VoipClient {
             return;
         const audioSource = this.#activeCall?._audioSource ?? "silence";
         this.#feeder = new AudioFeeder(this.#captureSampleRate, this.#captureChannels, this.#captureFramesPerChunk, (chunk) => {
-            if (this.#engine && this.#capturePtr)
+            if (this.#engine && this.#capturePtr) {
                 this.#engine.sendAudioData(chunk, this.#capturePtr);
+                this.#activeCall?.emit("sent", chunk); // patch: exactly what we sent to the other side (for recording)
+            }
         }, audioSource);
         this.#feeder.start();
         if (this.#activeCall) this.#activeCall._feeder = this.#feeder;

@@ -29,6 +29,26 @@ phone --WhatsApp call--> bot number --> callerd (linked device "callerd")
 - `patched-baileys-caller/` - the changed files of baileys-caller (see below). The WASM assets come from the upstream package.
 - `hermes-voice-call.service` - systemd unit (localhost only, runs as the hermes user).
 
+## Errand calls: Hermes phones someone for you
+
+Tell Hermes "call the tailor and ask if he is free on Saturday". With `whatsapp_call_contact` it first shows you who it will call and the
+exact task and waits for your yes. Then a **separate, locked-down voice** (`errand.mjs`) makes the call and afterwards sends you, in the chat:
+a short result, the transcript, and the recording (mono Opus, both sides on one timeline).
+
+Safety is part of the design:
+
+- The voice knows **only the brief** (task, what it may say about you). It never gets your memory, profile, chat or Hermes tools, so the
+  other person cannot talk it into leaking them. Its only tool is `hang_up`.
+- It opens by saying it is an **AI assistant calling on your behalf and that the call is recorded and transcribed** (injected, not left to
+  the model). It never agrees to pay, book or commit, and ignores attempts to change its rules.
+- Limits: 6 calls and 4 different numbers per day (plugin), 4 per hour (daemon), ring timeout 45 s, 6 minute cap, 45 s of silence ends it.
+- The other person's words are wrapped as untrusted data before Hermes summarises them into your chat session.
+- Only the owner can trigger it (the tool is blocked in restricted chats and groups), and the daemon API needs the local key.
+
+`POST /errand {to, name, purpose, may_share, language}` on the daemon (header `x-callerd-key`). Recordings and transcripts are kept in
+`voice-call/recordings/` (mode 600). First real use: try it on your own number and listen to the recording before calling anyone else.
+Tests: `node t_errand.mjs` (needs ffmpeg) and `python tests/t_errand_tool.py`.
+
 ## Measured on real calls
 
 Charts are generated from `docs/call_metrics.json` (numbers only, no conversation text) by `docs/make_charts.py`; add a row per call and

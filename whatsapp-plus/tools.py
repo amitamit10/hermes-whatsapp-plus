@@ -568,6 +568,142 @@ PAIRING_SCHEMA = {
 }
 
 
+CALL_CONTACT_SCHEMA = {
+    "name": "whatsapp_call_contact",
+    "description": (
+        "Phone SOMEONE ELSE on WhatsApp on the owner's behalf (an 'errand call'), e.g. 'call the tailor and ask if he is free on Saturday'. "
+        "A separate live voice makes the call: it says at the start that it is an AI assistant calling for the owner and that the call is recorded, "
+        "asks only what the task needs, never commits to anything and knows nothing private. When the call ends the owner automatically gets a short "
+        "result, the transcript and the recording in this chat - you do not need to do anything afterwards. "
+        "ONLY use it when the owner himself asks you to call someone, in a private chat with you. FIRST call it WITHOUT confirmed to get a preview, show the owner "
+        "who will be called, the exact task and what the voice may say about him, and wait for his clear yes; only then call it again with confirmed=true and the same arguments. "
+        "`to` = a phone number or a saved contact name. `purpose` = what to find out or say (one or two sentences, with every detail the voice needs: what, when, which item, "
+        "what answer you want). `may_share` = the only facts about the owner it may mention (default: nothing beyond his name). `language` = he/en/th/... the person is most likely to speak."
+    ),
+    "parameters": {"type": "object", "properties": {
+        "to": {"type": "string", "description": "Phone number (+66..., 0...) or saved contact name"},
+        "purpose": {"type": "string", "description": "What to ask or tell them, self-contained (max ~900 characters)"},
+        "may_share": {"type": "string", "description": "Optional: the only facts about the owner the voice may share"},
+        "language": {"type": "string", "description": "Optional language code of the person: he, en, th, ar, ru, es, fr, de"},
+        "confirmed": {"type": "boolean", "description": "true only after the owner clearly said yes to the preview"}}, "required": ["to", "purpose"]},
+}
+ERRAND_PER_DAY = 6          # calls to other people per day
+ERRAND_NUMBERS_PER_DAY = 4  # different numbers per day (calling people out of the blue is what gets numbers banned)
+
+
+def _errand_state_path():
+    return os.path.join(os.environ.get("HERMES_HOME", "/opt/data"), "state", "wa_errand_calls.json")
+
+
+def _errand_today():
+    day = time.strftime("%Y-%m-%d")
+    try:
+        d = json.load(open(_errand_state_path()))
+    except Exception:
+        d = {}
+    if d.get("day") != day:
+        d = {"day": day, "calls": []}
+    return d
+
+
+def _phone_digits(t):
+    """Same number rules as wa_send.py: +CC..., 00CC..., or a local 0xxxxxxxxx (Israeli prefix, like whatsapp_send)."""
+    d = re.sub(r"\D", "", t)
+    if t.strip().startswith("+"):
+        pass
+    elif d.startswith("00"):
+        d = d[2:]
+    elif d.startswith("0"):
+        d = "972" + d[1:]
+    return d if 8 <= len(d) <= 15 else None
+
+
+def _resolve_call_target(to):
+    """number/name -> (digits, label), using the same saved phone book as whatsapp_send."""
+    t = str(to or "").strip()
+    if "@" in t:
+        if t.endswith("@s.whatsapp.net"):
+            d = _phone_digits(t.split("@")[0].split(":")[0])
+            if d:
+                return d, None
+        raise ValueError("that is a group or something that cannot be phoned; give a person's number or saved name")
+    if re.fullmatch(r"[+\d\s()-]{8,}", t):
+        d = _phone_digits(t)
+        if d:
+            return d, None
+    try:
+        with open(os.path.join(os.environ.get("HERMES_HOME", "/opt/data"), "state", "wa_contacts.json")) as f:
+            book = json.load(f)
+    except Exception:
+        book = {}
+    low = {k.lower(): (k, v) for k, v in book.items()}
+    hit = low.get(t.lower())
+    if not hit:
+        part = [kv for k, kv in low.items() if t.lower() in k]
+        hit = part[0] if len(part) == 1 else None
+    if hit and _phone_digits(str(hit[1])):
+        return _phone_digits(str(hit[1])), hit[0]
+    raise ValueError("'%s' is not a number or a saved contact. Saved contacts: %s" % (t[:40], ", ".join(book) or "(none)"))
+
+
+def _call_contact(args, **kwargs):
+    args = args or {}
+    purpose = re.sub(r"\s+", " ", str(args.get("purpose") or "")).strip()[:900]
+    to = str(args.get("to") or "").strip()
+    if not to or len(purpose) < 8:
+        return json.dumps({"success": False, "error": "give `to` (number or saved name) and a `purpose` that says exactly what to find out or say"})
+    try:
+        number, label = _resolve_call_target(to)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    may_share = re.sub(r"\s+", " ", str(args.get("may_share") or "")).strip()[:500]
+    language = str(args.get("language") or "").strip().lower()[:2]
+    owners = _call_targets()
+    who = (label or "+" + number)
+    if not args.get("confirmed"):
+        return json.dumps({"success": True, "needs_confirmation": True,
+                           "preview": {"calling": who, "number": "+" + number, "task": purpose, "may_share_about_owner": may_share or "(nothing beyond his name)", "language": language or "(whatever they speak)",
+                                       "note": "The voice will say it is an AI assistant calling for the owner and that the call is recorded. This is a test on his own number." if any(_same_number(number, o) for o in owners) else
+                                       "The voice will say it is an AI assistant calling for the owner and that the call is recorded. The recording and transcript are sent to him afterwards."},
+                           "instruction": "Show this to the owner and ask if he wants the call. Only after a clear yes, call whatsapp_call_contact again with confirmed=true and the same arguments."})
+    st = _errand_today()
+    calls = st.get("calls", [])
+    if len(calls) >= ERRAND_PER_DAY:
+        return json.dumps({"success": False, "error": "daily limit reached (%d calls to other people per day); tell the owner" % ERRAND_PER_DAY})
+    if number not in {c.get("n") for c in calls} and len({c.get("n") for c in calls}) >= ERRAND_NUMBERS_PER_DAY and not any(_same_number(number, o) for o in owners):
+        return json.dumps({"success": False, "error": "limit reached: at most %d different people can be called per day (it protects the number from WhatsApp bans); tell the owner" % ERRAND_NUMBERS_PER_DAY})
+    import urllib.request, urllib.error
+    home = os.environ.get("HERMES_HOME", "/opt/data")
+    try:
+        key = open(os.path.join(home, "voice-call", "key")).read().strip()
+    except OSError:
+        return json.dumps({"success": False, "error": "the call service is not installed"})
+    body = {"to": number, "name": label or "", "purpose": purpose, "may_share": may_share, "language": language}
+    req = urllib.request.Request(os.environ.get("CALLERD_URL", "http://127.0.0.1:3100") + "/errand", method="POST", data=json.dumps(body).encode(),
+                                 headers={"x-callerd-key": key, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=40):
+            pass
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read().decode()).get("error", "")
+        except Exception:
+            msg = ""
+        return json.dumps({"success": False, "error": (msg or "HTTP %s" % e.code)[:160]})
+    except Exception:
+        return json.dumps({"success": False, "error": "the call service did not answer"})
+    calls.append({"n": number, "ts": int(time.time())})
+    st["calls"] = calls
+    try:
+        os.makedirs(os.path.dirname(_errand_state_path()), exist_ok=True)
+        with open(_errand_state_path(), "w") as f:
+            json.dump(st, f)
+    except OSError:
+        pass
+    return json.dumps({"success": True, "result": "Calling %s now (+%s). When the call ends, the owner automatically gets a short result, the transcript and the recording in this chat. "
+                       "Tell him the call is on its way and nothing else is needed from you." % (who, number)})
+
+
 def _pairing(args, **kwargs):
     args = args or {}
     try:
@@ -851,7 +987,7 @@ def _collab_pre_tool(tool_name=None, args=None, session_id=None, **kwargs):
         kind = entry[1]
         if tool_name == "whatsapp_history" and ((args or {}).get("include_dms") or (args or {}).get("list_chats")):
             return {"action": "block", "message": "Blocked: private 1:1 chats and the chat list are only for the owner. Group history is fine."}
-        if tool_name in ("whatsapp_pairing", "whatsapp_campaign", "whatsapp_call_me") or (tool_name == "whatsapp_group_control" and str((args or {}).get("action") or "") in ("approve_group", "revoke_group")):
+        if tool_name in ("whatsapp_pairing", "whatsapp_campaign", "whatsapp_call_me", "whatsapp_call_contact") or (tool_name == "whatsapp_group_control" and str((args or {}).get("action") or "") in ("approve_group", "revoke_group")):
             return {"action": "block", "message": "Blocked: approving people or groups is only possible when the owner asks you in a private chat with you."}
         if kind == "collab":
             try:
@@ -1090,6 +1226,7 @@ def register_tools(ctx) -> None:
     ctx.register_tool(name="whatsapp_send", toolset="whatsapp_send", schema=SEND_SCHEMA, handler=_send, emoji="💬")
     ctx.register_tool(name="whatsapp_campaign", toolset="whatsapp_send", schema=CAMPAIGN_SCHEMA, handler=_campaign, emoji="📣")
     ctx.register_tool(name="whatsapp_call_me", toolset="whatsapp_send", schema=CALL_ME_SCHEMA, handler=_call_me, emoji="\U0001F4DE")
+    ctx.register_tool(name="whatsapp_call_contact", toolset="whatsapp_send", schema=CALL_CONTACT_SCHEMA, handler=_call_contact, emoji="\U0001F4DE")
     ctx.register_tool(name="whatsapp_pairing", toolset="whatsapp_send", schema=PAIRING_SCHEMA, handler=_pairing, emoji="🤝")
     ctx.register_tool(name="whatsapp_history", toolset="whatsapp_send", schema=HISTORY_SCHEMA, handler=_history, emoji="📜")
     ctx.register_tool(name="whatsapp_group_control", toolset="whatsapp_send", schema=CONTROL_SCHEMA, handler=_control, emoji="🛑")
