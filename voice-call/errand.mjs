@@ -147,7 +147,7 @@ export function createErrand({ log, home, link, ringMs = 45000, maxMs = 6 * 6000
  * Out-of-band confirmation. The owner gets a one-time code in his private chat that the calling agent never sees; the call only starts when the
  * code comes back for EXACTLY the same call. Codes live only in this process (not on disk), expire, are single use, and failures are limited globally.
  */
-export const briefKey = (b) => createHash('sha256').update(JSON.stringify([String(b.n), String(b.purpose), String(b.mayShare || ''), String(b.language || '')])).digest('hex');
+export const briefKey = (b) => createHash('sha256').update(JSON.stringify([String(b.n), String(b.name || ''), String(b.purpose), String(b.mayShare || ''), String(b.language || '')])).digest('hex');
 
 export function createConfirmations({ send, clock = Date.now, ttlMs = 10 * 60000, tries = 3, previewsPerHour = 5, failsPerHour = 5 }) {
   const pending = new Map(); let previews = [], fails = [];

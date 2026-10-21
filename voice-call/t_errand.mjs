@@ -109,7 +109,7 @@ const tone = (n, f) => Float32Array.from({ length: n }, (_, i) => 0.3 * Math.sin
   const code = (msgs[0].match(/(\d{6})$/) || [])[1];
   check('preview sends a 6-digit code to the owner', p.ok && !!code);
   check('the message shows the FULL task, what may be shared, the language and the number', msgs[0].includes(longPurpose) && msgs[0].includes('two pairs, shortened') && msgs[0].includes('en') && msgs[0].includes('66812345678'));
-  check('a different brief cannot use the code (other task, other number, other sharing)', !conf.verify({ ...B, purpose: B.purpose + '!' }, code).ok && !conf.verify({ ...B, n: '66800000000' }, code).ok && !conf.verify({ ...B, mayShare: 'everything' }, code).ok);
+  check('a different brief cannot use the code (other task, number, sharing or name)', !conf.verify({ ...B, purpose: B.purpose + '!' }, code).ok && !conf.verify({ ...B, n: '66800000000' }, code).ok && !conf.verify({ ...B, mayShare: 'everything' }, code).ok && !conf.verify({ ...B, name: 'Somebody else' }, code).ok);
   check('wrong code refused', conf.verify(B, '000000').status === 403);
   check('right code works once', conf.verify(B, code).ok && !conf.verify(B, code).ok);
   now += 11 * 60000; await conf.preview(B); const c2 = msgs[1].match(/(\d{6})$/)[1]; now += 11 * 60000;

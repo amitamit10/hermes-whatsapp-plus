@@ -249,7 +249,7 @@ const server = http.createServer(async (req, res) => {
       if (n.length < 8 || n.length > 15) return json(res, 400, { error: 'to: digits with country code' });
       if (purpose.length < 8) return json(res, 400, { error: 'purpose: say what the call is for' });
       const lang = errandLanguage(b.language);
-      const brief = { n, name: String(b.name || '').slice(0, 60), purpose, mayShare: String(b.may_share || '').replace(/\s+/g, ' ').trim().slice(0, 500), language: String(b.language || '').toLowerCase().slice(0, 2), ownerName: cfg.OWNER_NAME || 'the owner' };
+      const brief = { n, name: String(b.name || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60), purpose, mayShare: String(b.may_share || '').replace(/\s+/g, ' ').trim().slice(0, 500), language: String(b.language || '').toLowerCase().slice(0, 2), ownerName: cfg.OWNER_NAME || 'the owner' };
       if (url.pathname === '/errand/preview') { const r = await confirmations.preview(brief); return json(res, r.ok ? 200 : r.status, r.ok ? { ok: true } : { error: r.error }); }
       if (call || errandBusy) return json(res, 409, { error: 'a call is already active' });
       const chk = confirmations.verify(brief, b.code);
