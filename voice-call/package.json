@@ -1,0 +1,15 @@
+{
+  "name": "hermes-voice-call",
+  "private": true,
+  "type": "module",
+  "description": "Local WhatsApp calling daemon for Hermes (wraps a patched baileys-caller). Listens on 127.0.0.1 only.",
+  "dependencies": {
+    "@roamhq/wrtc": "^0.10.0",
+    "@whiskeysockets/baileys": "7.0.0-rc13",
+    "qrcode-terminal": "^0.12.0",
+    "ws": "^8.22.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

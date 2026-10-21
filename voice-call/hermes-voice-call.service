@@ -1,0 +1,16 @@
+[Unit]
+Description=Hermes WhatsApp voice-call daemon (callerd, localhost only)
+After=network-online.target hermes-gateway.service
+
+[Service]
+User=hermes
+WorkingDirectory=/opt/data/voice-call
+Environment=HOME=/opt/data
+ExecStart=/usr/local/bin/node /opt/data/voice-call/callerd.mjs
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

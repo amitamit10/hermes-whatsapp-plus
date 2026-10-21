@@ -21,3 +21,4 @@ provides_tools:
   - whatsapp_poll
   - whatsapp_pairing
   - whatsapp_campaign
+  - whatsapp_call_me

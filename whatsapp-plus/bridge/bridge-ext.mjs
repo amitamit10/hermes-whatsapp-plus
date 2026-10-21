@@ -577,11 +577,67 @@ export default {
     sock.ev.on('group-participants.update', (u) => { try { metaCache.delete(u?.id); refreshMembers(); } catch (e) { /* ignore */ } });
     sock.ev.on('groups.upsert', () => { try { refreshMembers(); } catch (e) { /* ignore */ } });
     setInterval(refreshMembers, 10 * 60 * 1000).unref?.();
+    const CALL_NOTE = "[\u{1F4DE} The owner just called you on WhatsApp (missed: calls cannot be answered here). Call him back now: use the whatsapp_call_me tool with a short, friendly spoken greeting in his language (for example: 'Hi, I saw your call - what do you need?'). Then continue by voice: when he answers with a voice note, answer with another voice note via whatsapp_call_me.]";
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const HOME = process.env.HERMES_HOME || '/opt/data';
+    // ask the local call daemon (callerd) to call the owner back with a live voice; false -> use the voice-note fallback
+    const liveCallback = async (number) => {
+      try {
+        const key = readFileSync(HOME + '/voice-call/key', 'utf8').trim();
+        const r = await fetch((process.env.CALLERD_URL || 'http://127.0.0.1:3100') + '/call', {
+          method: 'POST', headers: { 'x-callerd-key': key, 'content-type': 'application/json' },
+          body: JSON.stringify({ to: number, mode: 'live', direction: 'back' }), signal: AbortSignal.timeout(25000),
+        });
+        return r.ok;
+      } catch (e) { console.error('whatsapp-plus live call-back not possible:', e.message); return false; }
+    };
+    const calledBack = new Map();   // caller -> last time we turned a call into a message (a ringing call fires several events)
+    const callUsers = () => {
+      const set = (settings().call_users || []).map(digits).filter(Boolean);
+      if (set.length) return set;
+      const first = [...ctx.ALLOWED_USERS][0];
+      return first ? [digits(first)] : [];
+    };
+    // ring the owner back (live voice if the call daemon can, else a message that makes Hermes send a voice note)
+    const callBack = async (c, callerJid) => {
+      if (Date.now() - (calledBack.get(callerJid) || 0) < Number(process.env.WA_CALL_THROTTLE_MS || 45000)) return;
+      calledBack.set(callerJid, Date.now());
+      await sleep(2500);                        // let the declined call settle before ringing back
+      if (await liveCallback(digits(callerJid))) return;
+      ctx.messageQueue.push({
+        messageId: 'call-' + c.id, chatId: callerJid, isGroup: false, senderId: callerJid, senderNumber: digits(callerJid),
+        senderName: names.get(digits(callerJid)) || digits(callerJid), body: CALL_NOTE, fromOwner: true, isCall: true,
+        timestamp: nowSec(), mentionedIds: [], botIds: [], hasMedia: false,
+      });
+    };
+    // is the call daemon (our second linked device) currently on a call it answered?
+    const daemonAnswered = async () => {
+      try {
+        const key = readFileSync(HOME + '/voice-call/key', 'utf8').trim();
+        const r = await fetch((process.env.CALLERD_URL || 'http://127.0.0.1:3100') + '/status', { headers: { 'x-callerd-key': key }, signal: AbortSignal.timeout(5000) });
+        const st = await r.json();
+        return !!(st.call && st.call.dir === 'in' && st.call.status === 'connected');
+      } catch (e) { return false; }
+    };
     sock.ev.on('call', async (calls) => {
       try {
         for (const c of calls || []) {
           if (c.status !== 'offer') continue;
+          const callerJid = lidToPhoneJid(c.chatId && String(c.chatId).endsWith('@s.whatsapp.net') ? c.chatId : c.from, ctx.SESSION_DIR);
+          const users = callUsers();
+          const isUser = users.includes(digits(callerJid)) || users.includes(digits(c.from));
+          if (isUser && settings().call_mode === 'answer') {
+            // call_mode=answer: do NOT decline - the call daemon answers with the live voice. If it has not picked up in time, decline and ring back.
+            void (async () => {
+              await sleep(Number(process.env.WA_ANSWER_WAIT_MS || 10000));
+              if (await daemonAnswered()) return;
+              try { await sock.rejectCall(c.id, c.from); } catch (e) { /* already ended */ }
+              await callBack(c, callerJid);
+            })();
+            continue;
+          }
           await sock.rejectCall(c.id, c.from);
+          if (isUser) { await callBack(c, callerJid); continue; }   // the owner: Hermes calls back
           const cr = settings().call_reply;
           if (cr === 'off') continue;
           if (Date.now() - (called.get(c.from) || 0) > 12 * 3600 * 1000) {

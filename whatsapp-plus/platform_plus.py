@@ -5,6 +5,7 @@ import dataclasses
 import hashlib
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -95,6 +96,24 @@ def ensure_bridge(stock_dir: Path) -> bool:
     return hooked
 
 
+def _ensure_link_preview() -> None:
+    """Baileys' link previews need the optional package link-preview-js; without it every link send logs a module-not-found
+    error. A Hermes update that reinstalls the bridge's node modules removes it, so (re)install it in the background."""
+    try:
+        nm = BRIDGE_DIR / "node_modules"
+        if not nm.is_dir() or nm.is_symlink() or (nm / "link-preview-js").exists():
+            return  # never touch a node_modules that belongs to Hermes itself (symlink)
+        import shutil
+        npm = shutil.which("npm")
+        if not npm:
+            return
+        subprocess.Popen([npm, "install", "--no-save", "--no-audit", "--no-fund", "--prefix", str(BRIDGE_DIR), "link-preview-js@^3.0.0"],
+                         cwd=str(BRIDGE_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        logger.info("whatsapp-plus: installing link-preview-js in the background (link previews)")
+    except Exception as exc:
+        logger.debug("whatsapp-plus: link-preview-js install not started: %s", exc)
+
+
 def _stock_registration():
     """The stock WhatsApp platform's own register() arguments, captured WITHOUT asking the platform registry.
 
@@ -140,6 +159,7 @@ def register_platform_plus(ctx) -> None:
     try:
         stock_dir = Path(stock_module.__file__).resolve().parents[3] / "scripts" / "whatsapp-bridge"
         ensure_bridge(stock_dir)
+        _ensure_link_preview()
     except Exception as exc:  # never break WhatsApp because of the extras
         logger.error("whatsapp-plus: could not build the extended bridge (%s)", exc)
     logger.info("whatsapp-plus: WhatsApp platform now uses %s (bridge: %s)", plus_cls.__name__, BRIDGE_DIR / "bridge.js")

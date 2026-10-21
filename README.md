@@ -22,9 +22,14 @@ this automates a personal WhatsApp account, which WhatsApp can restrict if abuse
 - **Outside contacts**: replies are marked untrusted and forwarded to the owner; the owner's session is told about them once.
 - **Tools** (`whatsapp_*`): send, contacts, history, group_control, status, delete, backfill, settings, react, groups, poll, pairing,
   campaign (ask the same thing to up to 10 shops and compare replies).
-- Bridge extras: @mentions by name, reactions while working, read receipts, call auto-reject, link previews, LID->phone mapping,
+- Bridge extras: @mentions by name, reactions while working, read receipts, calls (decline or call back; with the optional `voice-call/` daemon the bot answers and talks), link previews, LID->phone mapping,
   de-duplication, voice-note fixes, history sync hooks, send/status/delete/profile routes.
 - Safety: sensitive files are never sent, links need confirmation, 30 sends/hour and 10 new numbers/day, random gaps in campaigns.
+
+## Voice calls (experimental)
+
+The `whatsapp_call_me` tool and an optional daemon in [`voice-call/`](voice-call/) let the bot answer your WhatsApp calls (or call you) with
+a live Gemini voice that shares your chat session. See [`voice-call/README.md`](voice-call/README.md).
 
 ## Install
 

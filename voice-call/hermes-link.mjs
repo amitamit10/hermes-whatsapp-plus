@@ -1,0 +1,93 @@
+// Everything that ties a phone call to the owner's WhatsApp conversation with Hermes.
+import { execFile } from 'node:child_process';
+import path from 'node:path';
+
+export function createHermesLink({ here, home, hermesApi, hermesKey, bridgeUrl, log, python = 'python3' }) {
+/** The owner's WhatsApp conversation with Hermes (session id/key, recent messages, profile) so the call joins it. */
+const getSessionInfo = (ownerDigits) => new Promise((resolve) => {
+  execFile(python, [path.join(here, 'wa_session_info.py'), ownerDigits, '14'], { timeout: 10000, env: { ...process.env, HERMES_HOME: home } }, (err, out) => {
+    if (err) { log('session info failed:', String(err.message).slice(0, 100)); return resolve(null); }
+    try { const j = JSON.parse(out); resolve(j && j.session_id ? j : (j && j.profile ? j : null)); } catch { resolve(null); }
+  });
+});
+
+async function hermesTurn(text, info, system, effort, timeoutMs = 180000) {
+  const key = hermesKey();
+  if (!key) return { ok: false, text: 'Hermes API key is not available to the call service.' };
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), timeoutMs);
+  const headers = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key, 'X-Hermes-Session-Key': info?.session_key || 'whatsapp-voice-call' };
+  if (info?.session_id) headers['X-Hermes-Session-Id'] = info.session_id;   // the owner's real WhatsApp conversation
+  try {
+    const r = await fetch(hermesApi + '/v1/chat/completions', {
+      method: 'POST', signal: ctl.signal, headers,
+      body: JSON.stringify({ model: info?.model || 'hermes-agent', ...(info?.provider ? { provider: info.provider } : {}), stream: false,
+        ...(effort ? { model_options: { reasoning_effort: effort } } : {}),
+        messages: [{ role: 'system', content: system }, { role: 'user', content: String(text).slice(0, 12000) }] }),
+    });
+    if (!r.ok) return { ok: false, text: 'Hermes could not answer (HTTP ' + r.status + ').' };
+    const j = await r.json();
+    return { ok: true, text: String(j.choices?.[0]?.message?.content || '').slice(0, 2500) || 'Hermes returned nothing.' };
+  } catch (e) { return { ok: false, text: 'Hermes did not answer in time: ' + String(e?.message || e).slice(0, 80) }; }
+  finally { clearTimeout(t); }
+}
+
+const SPOKEN_SYSTEM = 'This request comes from a live WhatsApp voice call with the owner, inside his normal WhatsApp conversation with you. Do what is asked using your tools, then answer in one to three short spoken sentences: no markdown, no lists, no links.';
+async function askHermes(request, info, effort = 'none') { return (await hermesTurn('[Voice call] ' + request, info, SPOKEN_SYSTEM, effort)).text; }   // quick: no deep reasoning while someone waits on the phone
+
+/** After the call: let Hermes (same conversation) note it, finish anything left, and post a short summary in the WhatsApp chat. */
+async function postCallSummary(info, transcript, seconds, ownerDigits) {
+  const said = transcript.filter((l) => !l.startsWith('(asked Hermes')).length;
+  if (said < 2) { log('call too short for a summary'); return; }
+  const prompt = '[Voice call] The WhatsApp voice call with you just ended (' + Math.max(1, Math.round(seconds / 60)) + ' min). Transcript (HE = him, HERMES = the live voice speaking as you):\n' + transcript.join('\n').slice(0, 9000) +
+    '\n\nReply ONLY with a short Hebrew summary for the chat (2-4 lines: what was discussed or decided, what was done, what is still open). Do NOT start any new task, search or investigation now - just summarise; if something is still open, say so in the summary. No greeting.';
+  const r = await hermesTurn(prompt, info, 'You are summarising a phone call into the owner\'s WhatsApp chat. Reply in Hebrew, 2-4 short lines, plain text, immediately, without using tools.', 'none', 600000);
+  if (!r.ok) { log('call summary failed:', r.text); return; }
+  try {
+    const resp = await fetch(bridgeUrl + '/send', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000),
+      body: JSON.stringify({ chatId: ownerDigits + '@s.whatsapp.net', message: '\u{1F4DE} \u05e1\u05d9\u05db\u05d5\u05dd \u05e9\u05d9\u05d7\u05d4:\n' + r.text }),
+    });
+    log('call summary sent to the chat:', resp.status);
+  } catch (e) { log('call summary could not be sent:', String(e?.message || e).slice(0, 100)); }
+}
+
+const instructionsFor = (cfg, reason, direction, info) => (
+  'You ARE Hermes, ' + (cfg.OWNER_NAME || 'the owner') + '\'s personal assistant, speaking to him on a WhatsApp voice call. This is the SAME Hermes who writes to him in their WhatsApp chat: same personality, same opinions, same humour, same way of talking - just out loud. ' +
+  'The call is part of your ongoing chat: you remember it, and everything said here is added to that chat afterwards. ' +
+  'On the phone keep every turn short (one or two sentences), natural and casual, in the language he speaks (Hebrew unless he switches). Never read out markdown, URLs, code or long lists. ' +
+  'You are the voice only; your tools run through ask_hermes. RULE 1: for anything you would have to verify or do (facts, abilities, connections, accounts, files, messages, calendar, searches, memory, any action) you MUST FIRST say one very short phrase out loud like "רגע, בודק" or "שנייה, על זה" and THEN call ask_hermes with a complete request, and afterwards say its result in plain spoken words. ' +
+  'RULE 2: NEVER state from memory what you can do, what is connected, or whether something worked; if you do not know, say you will check and call ask_hermes. Do not use ask_hermes for small talk. ' +
+  'RULE 3: you are male: in Hebrew use masculine forms about yourself (אני בודק, אני מחובר, אני עוזר). Hebrew is his main language; if his words sound like another language, assume he spoke Hebrew unless he clearly speaks another one. ' +
+  'RULE 4: never agree to spend money, delete things or send messages on his behalf without him clearly saying yes. When the conversation is over, say goodbye and call hang_up. ' +
+  (direction === 'out' ? 'You are calling him. Reason for the call: ' + (reason || 'check in') + '. '
+    : direction === 'in' ? 'He called you and you answered. '
+    : 'He called you and you are calling him back. ' + (reason ? 'Note: ' + reason + '. ' : '')) +
+  (info?.soul ? '\n\nWho you are (your own personality file - speak exactly like this person):\n' + info.soul : '') +
+  (info?.style?.length ? '\n\nHow you actually write to him in the chat (copy this tone, word choice and length when you speak):\n' + info.style.map((x) => '- ' + x).join('\n') : '') +
+  (info?.profile ? '\n\nWhat you know about him (private notes): ' + info.profile : '') +
+  (info?.recent?.length ? '\n\nThe latest messages in your WhatsApp chat with him (oldest first), for context; do not recite them, use them naturally:\n' +
+    info.recent.map((m) => (m.role === 'user' ? 'HE: ' : 'YOU: ') + m.text).join('\n') : ''));
+
+  /** Post a message to the owner's WhatsApp chat (used for answers that finish after the voice stopped waiting). */
+  async function postToChat(ownerDigits, text) {
+    try {
+      const resp = await fetch(bridgeUrl + '/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000),
+        body: JSON.stringify({ chatId: ownerDigits + '@s.whatsapp.net', message: text }) });
+      log('posted to the chat:', resp.status);
+      return resp.ok;
+    } catch (e) { log('could not post to the chat:', String(e?.message || e).slice(0, 100)); return false; }
+  }
+
+  /** ask_hermes with a time limit: if Hermes needs longer the voice is told so, and the answer is posted to the chat when it arrives. */
+  async function askHermesBounded(request, info, ownerDigits, limitMs = 7000, onLate = null) {
+    const started = Date.now();
+    const work = askHermes(request, info);
+    const late = Symbol('late');
+    const first = await Promise.race([work, new Promise((r) => setTimeout(() => r(late), limitMs))]);
+    if (first !== late) return { text: first, late: false, ms: Date.now() - started };
+    work.then((answer) => { if (onLate && onLate(answer)) return; return postToChat(ownerDigits, '\u{1F4DE} \u05ea\u05e9\u05d5\u05d1\u05d4 \u05dc\u05de\u05d4 \u05e9\u05d1\u05d9\u05e7\u05e9\u05ea \u05d1\u05e9\u05d9\u05d7\u05d4:\n' + answer); });
+    return { text: 'This needs more than a few seconds, so it is continuing in the background; as soon as it is ready you will get it and say it to him. Tell him in a few words that you are still checking, and carry on the conversation.', late: true, ms: Date.now() - started };
+  }
+
+  return { postToChat, askHermesBounded, getSessionInfo, hermesTurn, askHermes, postCallSummary, instructionsFor };
+}
