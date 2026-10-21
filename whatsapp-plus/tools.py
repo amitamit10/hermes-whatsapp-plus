@@ -575,8 +575,8 @@ CALL_CONTACT_SCHEMA = {
         "A separate live voice makes the call: it says at the start that it is an AI assistant calling for the owner and that the call is recorded, "
         "asks only what the task needs, never commits to anything and knows nothing private. When the call ends the owner automatically gets a short "
         "result, the transcript and the recording in this chat - you do not need to do anything afterwards. "
-        "ONLY use it when the owner himself asks you to call someone, in a private chat with you. FIRST call it WITHOUT confirmed to get a preview, show the owner "
-        "who will be called, the exact task and what the voice may say about him, and wait for his clear yes; only then call it again with confirmed=true and the same arguments. "
+        "ONLY use it when the owner himself asks you to call someone, in a private chat with you. FIRST call it WITHOUT confirmed to get a preview (a one-time code is sent to his chat, you cannot see it); show the owner "
+        "who will be called, the exact task and what the voice may say about him, and wait for his clear yes AND the code he typed; only then call it again with the same arguments, confirmed=true and confirm_code. "
         "`to` = a phone number or a saved contact name. `purpose` = what to find out or say (one or two sentences, with every detail the voice needs: what, when, which item, "
         "what answer you want). `may_share` = the only facts about the owner it may mention (default: nothing beyond his name). `language` = he/en/th/... the person is most likely to speak."
     ),
@@ -585,7 +585,8 @@ CALL_CONTACT_SCHEMA = {
         "purpose": {"type": "string", "description": "What to ask or tell them, self-contained (max ~900 characters)"},
         "may_share": {"type": "string", "description": "Optional: the only facts about the owner the voice may share"},
         "language": {"type": "string", "description": "Optional language code of the person: he, en, th, ar, ru, es, fr, de"},
-        "confirmed": {"type": "boolean", "description": "true only after the owner clearly said yes to the preview"}}, "required": ["to", "purpose"]},
+        "confirmed": {"type": "boolean", "description": "true only after the owner clearly said yes to the preview"},
+        "confirm_code": {"type": "string", "description": "the one-time code the owner typed back to you (it is sent to his chat, you cannot see it)"}}, "required": ["to", "purpose"]},
 }
 ERRAND_PER_DAY = 6          # calls to other people per day
 ERRAND_NUMBERS_PER_DAY = 4  # different numbers per day (calling people out of the blue is what gets numbers banned)
@@ -646,6 +647,43 @@ def _resolve_call_target(to):
     raise ValueError("'%s' is not a number or a saved contact. Saved contacts: %s" % (t[:40], ", ".join(book) or "(none)"))
 
 
+def _errand_files():
+    st = os.path.join(os.environ.get("HERMES_HOME", "/opt/data"), "state")
+    os.makedirs(st, exist_ok=True)
+    return os.path.join(st, "wa_errand.lock"), os.path.join(st, "wa_errand_pending.json")
+
+
+class _ErrandLock:
+    """One errand decision at a time (code check, limit check and reservation must not interleave)."""
+    def __enter__(self):
+        import fcntl
+        self.f = open(_errand_files()[0], "a+")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        import fcntl
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
+def _json_load(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _owner_number():
+    return next((_digits(x) for x in re.split(r"[,\s]+", _env_value("WHATSAPP_ALLOWED_USERS")) if _digits(x)), "")
+
+
+def _errand_key(number, purpose, may_share, language):
+    import hashlib
+    return hashlib.sha256(("%s|%s|%s|%s" % (number, purpose, may_share, language)).encode()).hexdigest()
+
+
 def _call_contact(args, **kwargs):
     args = args or {}
     purpose = re.sub(r"\s+", " ", str(args.get("purpose") or "")).strip()[:900]
@@ -659,47 +697,97 @@ def _call_contact(args, **kwargs):
     may_share = re.sub(r"\s+", " ", str(args.get("may_share") or "")).strip()[:500]
     language = str(args.get("language") or "").strip().lower()[:2]
     owners = _call_targets()
+    owner = _owner_number()
     who = (label or "+" + number)
-    if not args.get("confirmed"):
+    key = _errand_key(number, purpose, may_share, language)
+    code_in = re.sub(r"\D", "", str(args.get("confirm_code") or ""))
+    now = time.time()
+    lock_path, pending_path = _errand_files()
+
+    if not (args.get("confirmed") and code_in):
+        # Out-of-band confirmation: a one-time code goes straight to the owner's private chat and is NEVER shown to you; he must type it back.
+        if not owner:
+            return json.dumps({"success": False, "error": "no owner number is configured, so a confirmation code cannot be sent"})
+        import secrets
+        code = "%04d" % (1000 + secrets.randbelow(9000))
+        with _ErrandLock():
+            pend = {k: v for k, v in _json_load(pending_path, {}).items() if v.get("exp", 0) > now}
+            pend[key] = {"code": code, "exp": now + 600, "tries": 0}
+            with open(pending_path, "w") as f:
+                json.dump(pend, f)
+        msg = ("\U0001F510 \u05d0\u05d9\u05e9\u05d5\u05e8 \u05e9\u05d9\u05d7\u05d4: Hermes \u05e8\u05d5\u05e6\u05d4 \u05dc\u05d4\u05ea\u05e7\u05e9\u05e8 \u05d0\u05dc %s (+%s).\n\u05de\u05e9\u05d9\u05de\u05d4: %s\n\u05e9\u05d9\u05d7\u05d4 \u05de\u05d5\u05e7\u05dc\u05d8\u05ea, \u05d5\u05d4\u05e7\u05d5\u05dc \u05d9\u05d5\u05d3\u05d9\u05e2 \u05e9\u05d4\u05d5\u05d0 \u05e2\u05d5\u05d6\u05e8 AI.\n\u05db\u05d3\u05d9 \u05dc\u05d0\u05e9\u05e8, \u05db\u05ea\u05d5\u05d1 \u05dc\u05d5 \u05d0\u05ea \u05d4\u05e7\u05d5\u05d3: %s" % (who, number, purpose[:300], code))
+        r = _bridge_post("/send", {"chatId": owner + "@s.whatsapp.net", "message": msg})
+        if not isinstance(r, dict) or r.get("error"):
+            return json.dumps({"success": False, "error": "could not send the confirmation code to the owner's chat"})
         return json.dumps({"success": True, "needs_confirmation": True,
                            "preview": {"calling": who, "number": "+" + number, "task": purpose, "may_share_about_owner": may_share or "(nothing beyond his name)", "language": language or "(whatever they speak)",
-                                       "note": "The voice will say it is an AI assistant calling for the owner and that the call is recorded. This is a test on his own number." if any(_same_number(number, o) for o in owners) else
-                                       "The voice will say it is an AI assistant calling for the owner and that the call is recorded. The recording and transcript are sent to him afterwards."},
-                           "instruction": "Show this to the owner and ask if he wants the call. Only after a clear yes, call whatsapp_call_contact again with confirmed=true and the same arguments."})
-    st = _errand_today()
-    calls = st.get("calls", [])
-    if len(calls) >= ERRAND_PER_DAY:
-        return json.dumps({"success": False, "error": "daily limit reached (%d calls to other people per day); tell the owner" % ERRAND_PER_DAY})
-    if number not in {c.get("n") for c in calls} and len({c.get("n") for c in calls}) >= ERRAND_NUMBERS_PER_DAY and not any(_same_number(number, o) for o in owners):
-        return json.dumps({"success": False, "error": "limit reached: at most %d different people can be called per day (it protects the number from WhatsApp bans); tell the owner" % ERRAND_NUMBERS_PER_DAY})
+                                       "note": "The voice will say it is an AI assistant calling for the owner and that the call is recorded. The recording and transcript are sent to him afterwards."},
+                           "instruction": "I sent the owner a one-time 4-digit code in his private chat (you cannot see it). Show him this preview and ask him to reply with a clear yes AND that code. "
+                                          "Only then call whatsapp_call_contact again with the same arguments, confirmed=true and confirm_code=<the digits he typed>. Never guess or invent a code."})
+
+    # confirmed: check the code, the limits and reserve the slot under one lock; the call itself happens afterwards
+    with _ErrandLock():
+        pend = {k: v for k, v in _json_load(pending_path, {}).items() if v.get("exp", 0) > now}
+        ent = pend.get(key)
+        if not ent:
+            return json.dumps({"success": False, "error": "no pending confirmation for exactly this call (or it expired): call without confirmed first"})
+        ent["tries"] = ent.get("tries", 0) + 1
+        if ent["tries"] > 3:
+            pend.pop(key, None)
+            with open(pending_path, "w") as f:
+                json.dump(pend, f)
+            return json.dumps({"success": False, "error": "too many wrong codes; start again with a new preview"})
+        if code_in != ent.get("code"):
+            with open(pending_path, "w") as f:
+                json.dump(pend, f)
+            return json.dumps({"success": False, "error": "that code is not right; ask the owner to type the code from his chat"})
+        pend.pop(key, None)                       # single use
+        with open(pending_path, "w") as f:
+            json.dump(pend, f)
+        st = _errand_today()
+        calls = st.get("calls", [])
+        if len(calls) >= ERRAND_PER_DAY:
+            return json.dumps({"success": False, "error": "daily limit reached (%d calls to other people per day); tell the owner" % ERRAND_PER_DAY})
+        own_test = any(_same_number(number, o) for o in owners)
+        if number not in {c.get("n") for c in calls} and len({c.get("n") for c in calls}) >= ERRAND_NUMBERS_PER_DAY and not own_test:
+            return json.dumps({"success": False, "error": "limit reached: at most %d different people can be called per day (it protects the number from WhatsApp bans); tell the owner" % ERRAND_NUMBERS_PER_DAY})
+        import secrets as _sec
+        reservation = {"n": number, "ts": int(now), "id": _sec.token_hex(4)}
+        calls.append(reservation)                 # reserved before the call is placed
+        st["calls"] = calls
+        with open(_errand_state_path(), "w") as f:
+            json.dump(st, f)
+
+    def _unreserve():
+        with _ErrandLock():
+            st2 = _errand_today()
+            st2["calls"] = [c for c in st2.get("calls", []) if c.get("id") != reservation["id"]]
+            with open(_errand_state_path(), "w") as f:
+                json.dump(st2, f)
+
     import urllib.request, urllib.error
     home = os.environ.get("HERMES_HOME", "/opt/data")
     try:
-        key = open(os.path.join(home, "voice-call", "key")).read().strip()
+        ckey = open(os.path.join(home, "voice-call", "key")).read().strip()
     except OSError:
+        _unreserve()
         return json.dumps({"success": False, "error": "the call service is not installed"})
     body = {"to": number, "name": label or "", "purpose": purpose, "may_share": may_share, "language": language}
     req = urllib.request.Request(os.environ.get("CALLERD_URL", "http://127.0.0.1:3100") + "/errand", method="POST", data=json.dumps(body).encode(),
-                                 headers={"x-callerd-key": key, "Content-Type": "application/json"})
+                                 headers={"x-callerd-key": ckey, "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=40):
             pass
     except urllib.error.HTTPError as e:
+        _unreserve()
         try:
             msg = json.loads(e.read().decode()).get("error", "")
         except Exception:
             msg = ""
         return json.dumps({"success": False, "error": (msg or "HTTP %s" % e.code)[:160]})
     except Exception:
+        _unreserve()
         return json.dumps({"success": False, "error": "the call service did not answer"})
-    calls.append({"n": number, "ts": int(time.time())})
-    st["calls"] = calls
-    try:
-        os.makedirs(os.path.dirname(_errand_state_path()), exist_ok=True)
-        with open(_errand_state_path(), "w") as f:
-            json.dump(st, f)
-    except OSError:
-        pass
     return json.dumps({"success": True, "result": "Calling %s now (+%s). When the call ends, the owner automatically gets a short result, the transcript and the recording in this chat. "
                        "Tell him the call is on its way and nothing else is needed from you." % (who, number)})
 

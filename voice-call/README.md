@@ -32,7 +32,8 @@ phone --WhatsApp call--> bot number --> callerd (linked device "callerd")
 ## Errand calls: Hermes phones someone for you
 
 Tell Hermes "call the tailor and ask if he is free on Saturday". With `whatsapp_call_contact` it first shows you who it will call and the
-exact task and waits for your yes. Then a **separate, locked-down voice** (`errand.mjs`) makes the call and afterwards sends you, in the chat:
+exact task, and sends a **one-time code to your private chat that Hermes itself cannot see**; the call only starts when you type that code back
+(a flag the model could set is not a confirmation). Then a **separate, locked-down voice** (`errand.mjs`) makes the call and afterwards sends you, in the chat:
 a short result, the transcript, and the recording (mono Opus, both sides on one timeline).
 
 Safety is part of the design:
@@ -42,7 +43,8 @@ Safety is part of the design:
 - It opens by saying it is an **AI assistant calling on your behalf and that the call is recorded and transcribed** (injected, not left to
   the model). It never agrees to pay, book or commit, and ignores attempts to change its rules.
 - Limits: 6 calls and 4 different numbers per day (plugin), 4 per hour (daemon), ring timeout 45 s, 6 minute cap, 45 s of silence ends it.
-- The other person's words are wrapped as untrusted data before Hermes summarises them into your chat session.
+- The other person's words are never given to an agent that has tools: the summary is a plain text completion (Gemini, no tools), and the transcript is posted as text.
+- Limits are reserved under a lock before the call is placed, so simultaneous requests cannot exceed them.
 - Only the owner can trigger it (the tool is blocked in restricted chats and groups), and the daemon API needs the local key.
 
 `POST /errand {to, name, purpose, may_share, language}` on the daemon (header `x-callerd-key`). Recordings and transcripts are kept in

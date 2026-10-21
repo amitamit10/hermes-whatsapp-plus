@@ -37,7 +37,7 @@ const readVars = (file, names) => {
   try { for (const line of readFileSync(file, 'utf8').split('\n')) { const m = /^([A-Z0-9_]+)=(.*)$/.exec(line.trim()); if (m && names.includes(m[1])) out[m[1]] = m[2].replace(/^["']|["']$/g, ''); } } catch {}
   return out;
 };
-const liveConfig = () => readVars(LIVE_ENV, ['GEMINI_API_KEY', 'OPENAI_API_KEY', 'LIVE_PROVIDER', 'GEMINI_LIVE_MODEL', 'GEMINI_LIVE_VOICE', 'OPENAI_REALTIME_MODEL', 'OPENAI_REALTIME_VOICE', 'OWNER_NAME', 'OWNER_NUMBER', 'INPUT_LANGUAGES', 'END_SILENCE_MS', 'ERRAND_PER_HOUR', 'ERRAND_MAX_MIN', 'ASK_MAX_MS', 'MAX_CALL_MIN', 'SILENCE_HANGUP_S', 'ASK_LIMIT_MS']);
+const liveConfig = () => readVars(LIVE_ENV, ['GEMINI_API_KEY', 'OPENAI_API_KEY', 'LIVE_PROVIDER', 'GEMINI_LIVE_MODEL', 'GEMINI_LIVE_VOICE', 'OPENAI_REALTIME_MODEL', 'OPENAI_REALTIME_VOICE', 'OWNER_NAME', 'OWNER_NUMBER', 'INPUT_LANGUAGES', 'END_SILENCE_MS', 'SUMMARY_MODEL', 'ERRAND_PER_HOUR', 'ERRAND_MAX_MIN', 'ASK_MAX_MS', 'MAX_CALL_MIN', 'SILENCE_HANGUP_S', 'ASK_LIMIT_MS']);
 const hermesKey = () => readVars(process.env.HERMES_ENV_FILE || HOME + '/.env', ['API_SERVER_KEY']).API_SERVER_KEY || '';
 const waSettings = () => { try { return JSON.parse(readFileSync(HOME + '/state/wa_settings.json', 'utf8')); } catch { return {}; } };
 /** The only number that may talk to the live voice: OWNER_NUMBER from live.env. */
@@ -59,8 +59,9 @@ const TOOLS = [
 import { createMemory } from './mempalace-link.mjs';
 import { createErrand, errandInstructions, errandTools, errandLanguage } from './errand.mjs';
 const memory = process.env.MEMORY_SEARCH === '0' ? null : createMemory({ here: HERE, home: HOME, python: process.env.MEMPALACE_PYTHON || '/srv/media-ingest/hermes-service-home/hermes-agent-src/venv313/bin/python', log });
-const errandTimes = [];
-const link = createHermesLink({ here: HERE, home: HOME, hermesApi: HERMES_API, hermesKey, bridgeUrl: process.env.BRIDGE_URL || 'http://127.0.0.1:3000', log });
+const errandTimes = []; let errandBusy = false;
+const link = createHermesLink({ here: HERE, home: HOME, hermesApi: HERMES_API, hermesKey, bridgeUrl: process.env.BRIDGE_URL || 'http://127.0.0.1:3000', log,
+  geminiKey: () => liveConfig().GEMINI_API_KEY || '', summaryModel: () => liveConfig().SUMMARY_MODEL || 'gemini-flash-latest' });
 const { getSessionInfo, askHermes, askHermesBounded, postCallSummary, instructionsFor } = link;
 
 const errand = createErrand({ log, home: HOME, link });
@@ -240,7 +241,7 @@ const server = http.createServer(async (req, res) => {
       // Hermes phones a third party for the owner. Locked down: the voice gets only the brief (no memory, no Hermes tools); the call is recorded.
       const b = await body(req);
       if (state !== 'ready' || !client) return json(res, 409, { error: 'not ready: ' + state });
-      if (call) return json(res, 409, { error: 'a call is already active' });
+      if (call || errandBusy) return json(res, 409, { error: 'a call is already active' });
       const n = digits(b.to), purpose = String(b.purpose || '').trim();
       if (n.length < 8 || n.length > 15) return json(res, 400, { error: 'to: digits with country code' });
       if (purpose.length < 8) return json(res, 400, { error: 'purpose: say what the call is for' });
@@ -248,17 +249,19 @@ const server = http.createServer(async (req, res) => {
       const perHour = Number(cfg.ERRAND_PER_HOUR) || 4, now = Date.now();
       while (errandTimes.length && now - errandTimes[0] > 3600000) errandTimes.shift();
       if (errandTimes.length >= perHour) return json(res, 429, { error: 'too many errand calls in the last hour (limit ' + perHour + ')' });
+      errandBusy = true; errandTimes.push(now);   // reserve the slot and the rate-limit entry before anything is awaited
+      const release = () => { errandBusy = false; const i = errandTimes.lastIndexOf(now); if (i >= 0) errandTimes.splice(i, 1); };
       const lang = errandLanguage(b.language);
       const brief = { name: String(b.name || '').slice(0, 60), purpose, mayShare: String(b.may_share || '').slice(0, 500), language: b.language, ownerName: cfg.OWNER_NAME || 'the owner' };
       let opened = null;
       try { opened = await openLive(null, '', 'out', null, { instructions: errandInstructions(brief), tools: errandTools(), inputLanguages: lang ? [lang.code] : undefined }); }
-      catch (e) { log('errand: live connect failed:', e.message); return json(res, e.status || 502, { error: e.message }); }
-      const ownerInfo = await getSessionInfo(owner);   // only used to report back into the owner's chat session
+      catch (e) { release(); log('errand: live connect failed:', e.message); return json(res, e.status || 502, { error: e.message }); }
       const maxMin = Number(cfg.ERRAND_MAX_MIN) || 6;
       try { call = await client.call(n, { audioSource: 'live', durationMs: (maxMin + 2) * 60000 }); }
-      catch (e) { opened.live.close(); log('errand: call failed:', e.message); return json(res, 502, { error: String(e.message || e).slice(0, 160) }); }
-      errandTimes.push(now);
+      catch (e) { opened.live.close(); release(); log('errand: call failed:', e.message); return json(res, 502, { error: String(e.message || e).slice(0, 160) }); }
+      errandBusy = false;
       const active = call;
+      const ownerInfo = null;   // the report is a tool-less summary: no owner session context is needed or used
       errand.wire(active, n, brief, opened, { setInfo: (i) => { callInfo = i; }, onEnd: () => { if (call === active) call = null; }, info: ownerInfo, owner, maxMs: maxMin * 60000 });
       log('errand started to', n.slice(0, 3) + '\u2026' + n.slice(-2));
       return json(res, 200, { ok: true, status: 'calling' });
