@@ -92,15 +92,11 @@ export class ActiveCall extends EventEmitter {
     end = () => {
         if (this.#ended)
             return;
-        this.#ended = true;
-        if (this.#endTimer) {
-            clearTimeout(this.#endTimer);
-            this.#endTimer = null;
-        }
         try {
             this.engine.endCall(0, true);
         }
         catch { }
+        this._forceEnd("local_end"); // patch: announce the end ("ended" was never emitted when we hung up ourselves, leaving the call stuck)
     };
     mute = (muted) => {
         try {

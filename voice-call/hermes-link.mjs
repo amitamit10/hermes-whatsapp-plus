@@ -11,12 +11,12 @@ const getSessionInfo = (ownerDigits) => new Promise((resolve) => {
   });
 });
 
-async function hermesTurn(text, info, system, effort, timeoutMs = 180000) {
+async function hermesTurn(text, info, system, effort, timeoutMs = 180000, side = false) {
   const key = hermesKey();
   if (!key) return { ok: false, text: 'Hermes API key is not available to the call service.' };
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), timeoutMs);
-  const headers = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key, 'X-Hermes-Session-Key': info?.session_key || 'whatsapp-voice-call' };
-  if (info?.session_id) headers['X-Hermes-Session-Id'] = info.session_id;   // the owner's real WhatsApp conversation
+  const headers = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key, 'X-Hermes-Session-Key': side ? 'whatsapp-voice-call-side' : (info?.session_key || 'whatsapp-voice-call') };
+  if (info?.session_id && !side) headers['X-Hermes-Session-Id'] = info.session_id;   // the owner's real WhatsApp conversation (a second request running at the same time gets its own session so the two do not overwrite each other)
   try {
     const r = await fetch(hermesApi + '/v1/chat/completions', {
       method: 'POST', signal: ctl.signal, headers,
@@ -31,8 +31,15 @@ async function hermesTurn(text, info, system, effort, timeoutMs = 180000) {
   finally { clearTimeout(t); }
 }
 
+let inflight = 0;
 const SPOKEN_SYSTEM = 'This request comes from a live WhatsApp voice call with the owner, inside his normal WhatsApp conversation with you. Do what is asked using your tools, then answer in one to three short spoken sentences: no markdown, no lists, no links.';
-async function askHermes(request, info, effort = 'none') { return (await hermesTurn('[Voice call] ' + request, info, SPOKEN_SYSTEM, effort)).text; }   // quick: no deep reasoning while someone waits on the phone
+async function askHermes(request, info, effort = 'none', timeoutMs = 180000) {
+  const side = inflight > 0; inflight++;
+  try {
+    const ctx = side && info?.recent?.length ? '\n\nRecent messages of the owner\'s chat with you, for context:\n' + info.recent.slice(-6).map((m) => (m.role === 'user' ? 'HE: ' : 'YOU: ') + String(m.text).slice(0, 300)).join('\n') : '';
+    return (await hermesTurn('[Voice call] ' + request, info, SPOKEN_SYSTEM + ctx, effort, timeoutMs, side)).text;
+  } finally { inflight--; }
+}   // quick: no deep reasoning while someone waits on the phone
 
 /** After the call: let Hermes (same conversation) note it, finish anything left, and post a short summary in the WhatsApp chat. */
 async function postCallSummary(info, transcript, seconds, ownerDigits) {
@@ -55,7 +62,8 @@ const instructionsFor = (cfg, reason, direction, info) => (
   'You ARE Hermes, ' + (cfg.OWNER_NAME || 'the owner') + '\'s personal assistant, speaking to him on a WhatsApp voice call. This is the SAME Hermes who writes to him in their WhatsApp chat: same personality, same opinions, same humour, same way of talking - just out loud. ' +
   'The call is part of your ongoing chat: you remember it, and everything said here is added to that chat afterwards. ' +
   'On the phone keep every turn short (one or two sentences), natural and casual, in the language he speaks (Hebrew unless he switches). Never read out markdown, URLs, code or long lists. ' +
-  'You are the voice only; your tools run through ask_hermes. RULE 1: for anything you would have to verify or do (facts, abilities, connections, accounts, files, messages, calendar, searches, memory, any action) you MUST FIRST say one very short phrase out loud like "רגע, בודק" or "שנייה, על זה" and THEN call ask_hermes with a complete request, and afterwards say its result in plain spoken words. ' +
+  'You are the voice only; your tools run through ask_hermes. RULE 1: for anything you would have to verify or do (facts, abilities, connections, accounts, files, messages, calendar, searches, memory, any action) you MUST FIRST say one very short phrase out loud that names what you are checking, like "רגע, בודק את האתר ואת מזג האוויר" or "שנייה, על זה", and THEN call ask_hermes with a complete request, and afterwards say its result in plain spoken words. ' +
+  'RULE 1b: if he asks for several different things in one sentence, call ask_hermes SEPARATELY for each thing, all in the same turn (for example website status and the weather are two calls), so they run at the same time. While they run you may keep chatting; say each result the moment it arrives, short, without waiting for the others. Do not stay silent for long: if it takes a while, say a short natural "עוד שנייה" once. ' +
   'RULE 2: NEVER state from memory what you can do, what is connected, or whether something worked; if you do not know, say you will check and call ask_hermes. Do not use ask_hermes for small talk. ' +
   'RULE 3: you are male: in Hebrew use masculine forms about yourself (אני בודק, אני מחובר, אני עוזר). Hebrew is his main language; if his words sound like another language, assume he spoke Hebrew unless he clearly speaks another one. ' +
   'RULE 4: never agree to spend money, delete things or send messages on his behalf without him clearly saying yes. When the conversation is over, say goodbye and call hang_up. ' +

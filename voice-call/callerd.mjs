@@ -37,11 +37,11 @@ const readVars = (file, names) => {
   try { for (const line of readFileSync(file, 'utf8').split('\n')) { const m = /^([A-Z0-9_]+)=(.*)$/.exec(line.trim()); if (m && names.includes(m[1])) out[m[1]] = m[2].replace(/^["']|["']$/g, ''); } } catch {}
   return out;
 };
-const liveConfig = () => readVars(LIVE_ENV, ['GEMINI_API_KEY', 'OPENAI_API_KEY', 'LIVE_PROVIDER', 'GEMINI_LIVE_MODEL', 'GEMINI_LIVE_VOICE', 'OPENAI_REALTIME_MODEL', 'OPENAI_REALTIME_VOICE', 'OWNER_NAME', 'OWNER_NUMBER', 'INPUT_LANGUAGES', 'END_SILENCE_MS', 'MAX_CALL_MIN', 'SILENCE_HANGUP_S', 'ASK_LIMIT_MS']);
+const liveConfig = () => readVars(LIVE_ENV, ['GEMINI_API_KEY', 'OPENAI_API_KEY', 'LIVE_PROVIDER', 'GEMINI_LIVE_MODEL', 'GEMINI_LIVE_VOICE', 'OPENAI_REALTIME_MODEL', 'OPENAI_REALTIME_VOICE', 'OWNER_NAME', 'OWNER_NUMBER', 'INPUT_LANGUAGES', 'END_SILENCE_MS', 'ASK_MAX_MS', 'MAX_CALL_MIN', 'SILENCE_HANGUP_S', 'ASK_LIMIT_MS']);
 const hermesKey = () => readVars(process.env.HERMES_ENV_FILE || HOME + '/.env', ['API_SERVER_KEY']).API_SERVER_KEY || '';
 const waSettings = () => { try { return JSON.parse(readFileSync(HOME + '/state/wa_settings.json', 'utf8')); } catch { return {}; } };
-/** Numbers (digits) that may talk to the live voice: wa_settings.json call_users, else OWNER_NUMBER from live.env. */
-const callUsers = () => { const u = (waSettings().call_users || []).map(digits).filter(Boolean); if (u.length) return u; const o = digits(liveConfig().OWNER_NUMBER); return o ? [o] : []; };
+/** The only number that may talk to the live voice: OWNER_NUMBER from live.env. */
+const callUsers = () => { const o = digits(liveConfig().OWNER_NUMBER); return o ? [o] : []; };   // only the owner gets the live voice (it can act with the owner's full Hermes)
 const lidToPhone = (jid) => {
   const j = String(jid || '');
   if (!j.endsWith('@lid')) return digits(j);
@@ -49,7 +49,7 @@ const lidToPhone = (jid) => {
 };
 
 const TOOLS = [
-  { name: 'ask_hermes', description: 'Ask Hermes (the full assistant with memory, files, web, calendar, messaging and other tools) to do something or look something up and answer. Say a short "one moment" to the caller first. Give a complete, self-contained request.',
+  { name: 'ask_hermes', behavior: process.env.ASYNC_TOOLS === '0' ? undefined : 'NON_BLOCKING', description: 'Ask Hermes (the full assistant with memory, files, web, calendar, messaging and other tools) to do something or look something up and answer. Say a short "one moment" naming what you check first. Call it once per separate topic, in the same turn, so they run in parallel. Give a complete, self-contained request.',
     parameters: { type: 'object', properties: { request: { type: 'string', description: 'What to do or find out, with all the details needed' } }, required: ['request'] } },
   { name: 'hang_up', description: 'End the call. Say goodbye first. Use it only when the conversation is clearly over.', parameters: { type: 'object', properties: {} } },
 ];
@@ -98,7 +98,7 @@ function wireCall(active, n, { live, provider, mode, direction, reason, info }) 
         'interruptions: ' + m.interruptions + ' | audio stalls (choppy moments): ' + m.audioStalls + ' | asked Hermes ' + m.askHermes + 'x (avg ' + (m.avgAskHermesMs ?? '-') + ' ms) | received audio frames: ' + m.frames);
       writeFileSync(path.join(TRANSCRIPTS, stamp + '_' + n.slice(-4) + '.txt'), lines.join('\n') + '\n', { mode: 0o600 });
       mkdirSync(HOME + '/state', { recursive: true });
-      appendFileSync(HOME + '/state/wa_call_log.jsonl', JSON.stringify({ ts: Date.now(), to: n, dir: callInfo.dir, provider, seconds: Math.round((Date.now() - callInfo.startedAt) / 1000), reason: why, turns: transcript.length, metrics: m, said: plain().slice(-6) }) + '\n');
+      appendFileSync(HOME + '/state/wa_call_log.jsonl', JSON.stringify({ ts: Date.now(), to: n, dir: callInfo.dir, provider, seconds: Math.round((Date.now() - callInfo.startedAt) / 1000), reason: why, turns: transcript.length, metrics: m, said: plain().slice(-6) }) + '\n', { mode: 0o600 });
     } catch (e) { log('transcript save failed:', e.message); } }
     log('ended:', why, live ? JSON.stringify(m) : ''); if (call === active) call = null;
     if (live) void postCallSummary(info, plain(), (Date.now() - callInfo.startedAt) / 1000, n);
@@ -131,13 +131,24 @@ function wireCall(active, n, { live, provider, mode, direction, reason, info }) 
       callInfo.turns = transcript.length;
     });
     live.on('toolCall', async (calls) => {
+      const ASYNC = process.env.ASYNC_TOOLS !== '0' && callInfo?.provider === 'gemini';   // non-blocking: the voice keeps talking while Hermes works, and several lookups run at the same time
       for (const c of calls) {
         if (c.name === 'hang_up') { live.sendToolResult(c.id, c.name, 'ok'); hangupWanted = Date.now(); continue; }
         if (c.name === 'ask_hermes') {
-          log('ask_hermes:', String(c.args?.request || '').slice(0, 80)); const t1 = Date.now(); asking++; askingSince = t1;
-          const r = await askHermesBounded(c.args?.request || '', info, n, Number(liveConfig().ASK_LIMIT_MS) || 7000,
-            (answer) => { if (call === active && callInfo?.status === 'connected' && live) { live.sendText('Hermes finished checking. Tell him the answer now, short and natural, in Hebrew: ' + String(answer).slice(0, 1500)); transcript.push({ t: since(), tag: "", text: '(late answer from Hermes spoken)' }); return true; } return false; }); M.askHermes++; M.askMs.push(r.ms); asking = Math.max(0, asking - 1); askingSince = Date.now();
-          transcript.push({ t: since(), tag: '', text: '(asked Hermes: ' + String(c.args?.request || '').slice(0, 120) + ' -> ' + (r.late ? 'continued in the background after ' : 'answered in ') + r.ms + ' ms)' }); live.sendToolResult(c.id, c.name, r.text); continue;
+          const req = String(c.args?.request || ''); log('ask_hermes:', req.slice(0, 80)); const t1 = Date.now(); asking++; askingSince = t1;
+          const note = (how) => { M.askHermes++; M.askMs.push(Date.now() - t1); asking = Math.max(0, asking - 1); askingSince = Date.now(); transcript.push({ t: since(), tag: '', text: '(asked Hermes: ' + req.slice(0, 120) + ' -> ' + how + (Date.now() - t1) + ' ms)' }); };
+          if (ASYNC) {
+            void (async () => {
+              const text = await askHermes(req, info, 'none', Number(liveConfig().ASK_MAX_MS) || 90000);
+              note('answered in ');
+              if (call === active && callInfo?.status === 'connected' && live) live.sendToolResult(c.id, c.name, text, 'WHEN_IDLE');   // spoken as soon as he is not mid-sentence
+              else void link.postToChat(n, '\u{1F4DE} \u05ea\u05e9\u05d5\u05d1\u05d4 \u05dc\u05de\u05d4 \u05e9\u05d1\u05d9\u05e7\u05e9\u05ea \u05d1\u05e9\u05d9\u05d7\u05d4:\n' + text);
+            })();
+            continue;
+          }
+          const r = await askHermesBounded(req, info, n, Number(liveConfig().ASK_LIMIT_MS) || 7000,
+            (answer) => { if (call === active && callInfo?.status === 'connected' && live) { live.sendText('Hermes finished checking. Tell him the answer now, short and natural, in Hebrew: ' + String(answer).slice(0, 1500)); transcript.push({ t: since(), tag: "", text: '(late answer from Hermes spoken)' }); return true; } return false; });
+          note(r.late ? 'continued in the background after ' : 'answered in '); live.sendToolResult(c.id, c.name, r.text); continue;
         }
         live.sendToolResult(c.id, c.name, 'unknown tool');
       }
