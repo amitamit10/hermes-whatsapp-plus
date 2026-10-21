@@ -4,7 +4,7 @@ import http from 'node:http';
 import { existsSync, readFileSync, mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createErrand, errandInstructions, errandOpening, errandTools } from './errand.mjs';
+import { createErrand, createConfirmations, errandInstructions, errandOpening, errandTools } from './errand.mjs';
 import { createHermesLink } from './hermes-link.mjs';
 
 let ok = 0, fail = 0; const check = (n, c, extra) => { (c ? ok++ : fail++); console.log(c ? 'PASS' : 'FAIL', n, c ? '' : (extra ?? '')); };
@@ -97,5 +97,43 @@ const tone = (n, f) => Float32Array.from({ length: n }, (_, i) => 0.3 * Math.sin
   errand.wire(a2, '66812345678', brief, { live: l2, provider: 'gemini' }, { setInfo: (i) => { i2 = i; }, onEnd: () => {}, info: {}, owner: '972500000001' });
   a2.emit('ringing'); a2.emit('ended', 'rejected'); await new Promise((r) => setTimeout(r, 300));
   check('rejected call reported', i2.reason === 'rejected' && /rejected/.test(posts.find((p) => p.url === '/send')?.body.message || ''), JSON.stringify(posts.map((p) => p.url)));
+}
+
+// 6. out-of-band confirmation codes (held in memory by the daemon; the calling agent never sees them)
+{
+  let now = 1_000_000; const clock = () => now; const msgs = [];
+  const conf = createConfirmations({ send: async (m) => { msgs.push(m); return true; }, clock });
+  const longPurpose = 'Ask about the Saturday fitting. ' + 'x'.repeat(850);
+  const B = { n: '66812345678', name: 'Joe', purpose: longPurpose, mayShare: 'two pairs, shortened', language: 'en' };
+  const p = await conf.preview(B);
+  const code = (msgs[0].match(/(\d{6})$/) || [])[1];
+  check('preview sends a 6-digit code to the owner', p.ok && !!code);
+  check('the message shows the FULL task, what may be shared, the language and the number', msgs[0].includes(longPurpose) && msgs[0].includes('two pairs, shortened') && msgs[0].includes('en') && msgs[0].includes('66812345678'));
+  check('a different brief cannot use the code (other task, other number, other sharing)', !conf.verify({ ...B, purpose: B.purpose + '!' }, code).ok && !conf.verify({ ...B, n: '66800000000' }, code).ok && !conf.verify({ ...B, mayShare: 'everything' }, code).ok);
+  check('wrong code refused', conf.verify(B, '000000').status === 403);
+  check('right code works once', conf.verify(B, code).ok && !conf.verify(B, code).ok);
+  now += 11 * 60000; await conf.preview(B); const c2 = msgs[1].match(/(\d{6})$/)[1]; now += 11 * 60000;
+  check('codes expire after 10 minutes', !conf.verify(B, c2).ok);
+}
+{
+  let now = 5_000_000; const clock = () => now; const msgs = [];
+  const conf = createConfirmations({ send: async (m) => { msgs.push(m); return true; }, clock });
+  const mk = (i) => ({ n: '6680000000' + i, name: '', purpose: 'Ask something number ' + i, mayShare: '', language: '' });
+  for (let i = 0; i < 5; i++) await conf.preview(mk(i));
+  const lim = await conf.preview(mk(5));
+  check('previews are limited globally (5 per hour)', !lim.ok && lim.status === 429);
+  // wrong codes are counted across ALL calls, a fresh preview does not reset them
+  for (let i = 0; i < 3; i++) conf.verify(mk(0), '111111');
+  conf.verify(mk(1), '111111'); conf.verify(mk(2), '111111');
+  const real = msgs[3].match(/(\d{6})$/)[1];
+  const locked = conf.verify(mk(3), real);
+  check('5 wrong codes anywhere lock every errand call for the hour (even the right code)', !locked.ok && locked.status === 429, JSON.stringify(locked));
+  now += 61 * 60000; await conf.preview(mk(6));
+  check('lock and counters clear after an hour', conf.verify(mk(6), msgs[msgs.length - 1].match(/(\d{6})$/)[1]).ok);
+}
+{
+  const conf = createConfirmations({ send: async () => false });
+  const r = await conf.preview({ n: '66812345678', name: '', purpose: 'Ask something please', mayShare: '', language: '' });
+  check('if the code cannot be sent to the owner nothing becomes valid', !r.ok && r.status === 502);
 }
 console.log(ok + ' passed, ' + fail + ' failed'); srv.close(); process.exit(fail ? 1 : 0);

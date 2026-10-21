@@ -6,6 +6,7 @@
 import { execFile } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, statSync, chmodSync } from 'node:fs';
 import path from 'node:path';
+import { createHash, randomInt } from 'node:crypto';
 
 const SR = 16000;
 const LANGS = { he: ['he-IL', 'Hebrew'], en: ['en-US', 'English'], th: ['th-TH', 'Thai'], ar: ['ar-XA', 'Arabic'], ru: ['ru-RU', 'Russian'], es: ['es-US', 'Spanish'], fr: ['fr-FR', 'French'], de: ['de-DE', 'German'] };
@@ -140,4 +141,41 @@ export function createErrand({ log, home, link, ringMs = 45000, maxMs = 6 * 6000
   }
 
   return { wire };
+}
+
+/**
+ * Out-of-band confirmation. The owner gets a one-time code in his private chat that the calling agent never sees; the call only starts when the
+ * code comes back for EXACTLY the same call. Codes live only in this process (not on disk), expire, are single use, and failures are limited globally.
+ */
+export const briefKey = (b) => createHash('sha256').update(JSON.stringify([String(b.n), String(b.purpose), String(b.mayShare || ''), String(b.language || '')])).digest('hex');
+
+export function createConfirmations({ send, clock = Date.now, ttlMs = 10 * 60000, tries = 3, previewsPerHour = 5, failsPerHour = 5 }) {
+  const pending = new Map(); let previews = [], fails = [];
+  const recent = (arr) => arr.filter((t) => clock() - t < 3600000);
+  const message = (b) => '\u{1F510} \u05d0\u05d9\u05e9\u05d5\u05e8 \u05e9\u05d9\u05d7\u05d4: Hermes \u05e8\u05d5\u05e6\u05d4 \u05dc\u05d4\u05ea\u05e7\u05e9\u05e8 \u05d0\u05dc ' + (b.name ? b.name + ' ' : '') + '(+' + b.n + ').\n' +
+    '\u05de\u05e9\u05d9\u05de\u05d4: ' + b.purpose + '\n' + '\u05de\u05d4 \u05de\u05d5\u05ea\u05e8 \u05dc\u05d5 \u05dc\u05d5\u05de\u05e8 \u05e2\u05dc\u05d9\u05da: ' + (b.mayShare || '(\u05e8\u05e7 \u05d0\u05ea \u05d4\u05e9\u05dd \u05e9\u05dc\u05da)') + '\n' +
+    '\u05e9\u05e4\u05d4: ' + (b.language || '(\u05d4\u05e9\u05e4\u05d4 \u05e9\u05d4\u05d5\u05d0 \u05de\u05d3\u05d1\u05e8)') + '\n' + '\u05d4\u05e9\u05d9\u05d7\u05d4 \u05de\u05d5\u05e7\u05dc\u05d8\u05ea \u05d5\u05d4\u05e7\u05d5\u05dc \u05d9\u05d5\u05d3\u05d9\u05e2 \u05e9\u05d4\u05d5\u05d0 \u05e2\u05d5\u05d6\u05e8 AI.\n' +
+    '\u05db\u05d3\u05d9 \u05dc\u05d0\u05e9\u05e8, \u05db\u05ea\u05d5\u05d1 \u05dc\u05d5 \u05d0\u05ea \u05d4\u05e7\u05d5\u05d3: ';
+  return {
+    /** b = { n, name, purpose, mayShare, language } (already normalised). Sends the owner the FULL details and the code. */
+    async preview(b) {
+      previews = recent(previews);
+      if (previews.length >= previewsPerHour) return { ok: false, status: 429, error: 'too many confirmation requests this hour' };
+      const code = String(randomInt(100000, 1000000)), key = briefKey(b);
+      previews.push(clock()); pending.set(key, { code, exp: clock() + ttlMs, tries: 0 });
+      if (!(await send(message(b) + code))) { pending.delete(key); return { ok: false, status: 502, error: 'could not send the confirmation code to the owner' }; }
+      return { ok: true };
+    },
+    /** Checks the code for exactly this call; consumes it on success. Wrong codes are counted across ALL calls and lock everything for the hour. */
+    verify(b, code) {
+      fails = recent(fails);
+      if (fails.length >= failsPerHour) return { ok: false, status: 429, error: 'too many wrong codes; errand calls are locked for a while' };
+      const key = briefKey(b), e = pending.get(key);
+      if (!e || e.exp < clock()) { pending.delete(key); return { ok: false, status: 403, error: 'no pending confirmation for exactly this call (or it expired): ask for a new preview' }; }
+      e.tries++;
+      if (e.tries > tries) { pending.delete(key); fails.push(clock()); return { ok: false, status: 403, error: 'too many wrong codes for this call; ask for a new preview' }; }
+      if (String(code || '').replace(/\D/g, '') !== e.code) { fails.push(clock()); return { ok: false, status: 403, error: 'that code is not right; the owner has to type the code from his chat' }; }
+      pending.delete(key); return { ok: true };
+    },
+  };
 }

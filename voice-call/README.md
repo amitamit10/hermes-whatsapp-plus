@@ -32,8 +32,10 @@ phone --WhatsApp call--> bot number --> callerd (linked device "callerd")
 ## Errand calls: Hermes phones someone for you
 
 Tell Hermes "call the tailor and ask if he is free on Saturday". With `whatsapp_call_contact` it first shows you who it will call and the
-exact task, and sends a **one-time code to your private chat that Hermes itself cannot see**; the call only starts when you type that code back
-(a flag the model could set is not a confirmation). Then a **separate, locked-down voice** (`errand.mjs`) makes the call and afterwards sends you, in the chat:
+exact task, and the call daemon sends you a **6-digit one-time code in your private chat with the full details (task, what may be shared, language, number)**. Hermes never sees the code:
+it is held only in the daemon's memory (not on disk), expires after 10 minutes, is single use, only works for exactly that call, and 5 wrong codes
+or 5 previews per hour (counted across all calls) lock errand calls. A flag the model could set is not a confirmation. Limit: an agent that has full
+shell access as the same OS user can't be fully contained by any in-process check; this protects against prompt injection, not a hostile host. Then a **separate, locked-down voice** (`errand.mjs`) makes the call and afterwards sends you, in the chat:
 a short result, the transcript, and the recording (mono Opus, both sides on one timeline).
 
 Safety is part of the design:

@@ -57,9 +57,10 @@ const TOOLS = [
 ];
 
 import { createMemory } from './mempalace-link.mjs';
-import { createErrand, errandInstructions, errandTools, errandLanguage } from './errand.mjs';
+import { createErrand, createConfirmations, errandInstructions, errandTools, errandLanguage } from './errand.mjs';
 const memory = process.env.MEMORY_SEARCH === '0' ? null : createMemory({ here: HERE, home: HOME, python: process.env.MEMPALACE_PYTHON || '/srv/media-ingest/hermes-service-home/hermes-agent-src/venv313/bin/python', log });
 const errandTimes = []; let errandBusy = false;
+const confirmations = createConfirmations({ send: (text) => link.postToChat(digits(liveConfig().OWNER_NUMBER), text) });
 const link = createHermesLink({ here: HERE, home: HOME, hermesApi: HERMES_API, hermesKey, bridgeUrl: process.env.BRIDGE_URL || 'http://127.0.0.1:3000', log,
   geminiKey: () => liveConfig().GEMINI_API_KEY || '', summaryModel: () => liveConfig().SUMMARY_MODEL || 'gemini-flash-latest' });
 const { getSessionInfo, askHermes, askHermesBounded, postCallSummary, instructionsFor } = link;
@@ -237,22 +238,27 @@ const server = http.createServer(async (req, res) => {
       for (let i = 0; i < 40 && !pairingCode && !error; i++) await new Promise((r) => setTimeout(r, 500));
       return json(res, pairingCode ? 200 : 500, { pairingCode, error });
     }
-    if (req.method === 'POST' && url.pathname === '/errand') {
-      // Hermes phones a third party for the owner. Locked down: the voice gets only the brief (no memory, no Hermes tools); the call is recorded.
+    if (req.method === 'POST' && (url.pathname === '/errand' || url.pathname === '/errand/preview')) {
+      // Hermes phones a third party for the owner. Locked down: the voice gets only the brief (no memory, no Hermes tools); the call is recorded;
+      // and it only starts with the one-time code the owner types back (preview sends it to his private chat, the agent never sees it).
       const b = await body(req);
       if (state !== 'ready' || !client) return json(res, 409, { error: 'not ready: ' + state });
-      if (call || errandBusy) return json(res, 409, { error: 'a call is already active' });
-      const n = digits(b.to), purpose = String(b.purpose || '').trim();
+      const cfg = liveConfig(), owner = digits(cfg.OWNER_NUMBER);
+      if (!owner) return json(res, 412, { error: 'OWNER_NUMBER is not configured' });
+      const n = digits(b.to), purpose = String(b.purpose || '').replace(/\s+/g, ' ').trim().slice(0, 900);
       if (n.length < 8 || n.length > 15) return json(res, 400, { error: 'to: digits with country code' });
       if (purpose.length < 8) return json(res, 400, { error: 'purpose: say what the call is for' });
-      const cfg = liveConfig(), owner = digits(cfg.OWNER_NUMBER);
+      const lang = errandLanguage(b.language);
+      const brief = { n, name: String(b.name || '').slice(0, 60), purpose, mayShare: String(b.may_share || '').replace(/\s+/g, ' ').trim().slice(0, 500), language: String(b.language || '').toLowerCase().slice(0, 2), ownerName: cfg.OWNER_NAME || 'the owner' };
+      if (url.pathname === '/errand/preview') { const r = await confirmations.preview(brief); return json(res, r.ok ? 200 : r.status, r.ok ? { ok: true } : { error: r.error }); }
+      if (call || errandBusy) return json(res, 409, { error: 'a call is already active' });
+      const chk = confirmations.verify(brief, b.code);
+      if (!chk.ok) return json(res, chk.status, { error: chk.error });
       const perHour = Number(cfg.ERRAND_PER_HOUR) || 4, now = Date.now();
       while (errandTimes.length && now - errandTimes[0] > 3600000) errandTimes.shift();
       if (errandTimes.length >= perHour) return json(res, 429, { error: 'too many errand calls in the last hour (limit ' + perHour + ')' });
       errandBusy = true; errandTimes.push(now);   // reserve the slot and the rate-limit entry before anything is awaited
       const release = () => { errandBusy = false; const i = errandTimes.lastIndexOf(now); if (i >= 0) errandTimes.splice(i, 1); };
-      const lang = errandLanguage(b.language);
-      const brief = { name: String(b.name || '').slice(0, 60), purpose, mayShare: String(b.may_share || '').slice(0, 500), language: b.language, ownerName: cfg.OWNER_NAME || 'the owner' };
       let opened = null;
       try { opened = await openLive(null, '', 'out', null, { instructions: errandInstructions(brief), tools: errandTools(), inputLanguages: lang ? [lang.code] : undefined }); }
       catch (e) { release(); log('errand: live connect failed:', e.message); return json(res, e.status || 502, { error: e.message }); }
