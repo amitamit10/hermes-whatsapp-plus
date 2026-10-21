@@ -24,6 +24,7 @@ phone --WhatsApp call--> bot number --> callerd (linked device "callerd")
   are resumed transparently when the ~10 minute connection limit (`goAway`) hits or the socket drops.
 - `hermes-link.mjs` - talks to the Hermes API server, builds the voice persona (SOUL.md, your chat style, profile, recent chat),
   bounded `ask_hermes` (late answers are spoken, or posted to the chat if you hung up), post-call summary.
+- `mempalace-link.mjs` + `mempalace_server.py` - optional fast **MemPalace** recall: a warm, read-only Python helper (run in the Hermes venv) behind the voice's `search_memory` tool. A recall question ("what did we decide about...") takes about 2 s instead of a full Hermes turn. Disable with `MEMORY_SEARCH=0`; set `MEMPALACE_PYTHON` to the interpreter that can import `mempalace`.
 - `wa_session_info.py` - read-only helper that finds the owner's session, recent messages, model and persona files.
 - `patched-baileys-caller/` - the changed files of baileys-caller (see below). The WASM assets come from the upstream package.
 - `hermes-voice-call.service` - systemd unit (localhost only, runs as the hermes user).

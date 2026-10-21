@@ -51,9 +51,13 @@ const lidToPhone = (jid) => {
 const TOOLS = [
   { name: 'ask_hermes', behavior: process.env.ASYNC_TOOLS === '0' ? undefined : 'NON_BLOCKING', description: 'Ask Hermes (the full assistant with memory, files, web, calendar, messaging and other tools) to do something or look something up and answer. Say a short "one moment" naming what you check first. Call it once per separate topic, in the same turn, so they run in parallel. Give a complete, self-contained request.',
     parameters: { type: 'object', properties: { request: { type: 'string', description: 'What to do or find out, with all the details needed' } }, required: ['request'] } },
+  { name: 'search_memory', behavior: process.env.ASYNC_TOOLS === '0' ? undefined : 'NON_BLOCKING', description: 'Search Hermes\'s long-term memory (MemPalace) for what is already known: people, projects, decisions, past conversations, preferences. Fast (a second or two). Use it FIRST for "what do you remember / what did we decide / what do you know about X / who is Y". Say a short "one moment, searching my memory" first. For live information or actions use ask_hermes instead.',
+    parameters: { type: 'object', properties: { query: { type: 'string', description: 'What to look for, as a short descriptive phrase with the names involved' } }, required: ['query'] } },
   { name: 'hang_up', description: 'End the call. Say goodbye first. Use it only when the conversation is clearly over.', parameters: { type: 'object', properties: {} } },
 ];
 
+import { createMemory } from './mempalace-link.mjs';
+const memory = process.env.MEMORY_SEARCH === '0' ? null : createMemory({ here: HERE, home: HOME, python: process.env.MEMPALACE_PYTHON || '/srv/media-ingest/hermes-service-home/hermes-agent-src/venv313/bin/python', log });
 const link = createHermesLink({ here: HERE, home: HOME, hermesApi: HERMES_API, hermesKey, bridgeUrl: process.env.BRIDGE_URL || 'http://127.0.0.1:3000', log });
 const { getSessionInfo, askHermes, askHermesBounded, postCallSummary, instructionsFor } = link;
 
@@ -63,6 +67,7 @@ const registered = () => existsSync(path.join(AUTH, 'creds.json')) && JSON.parse
 
 /** Connect the live voice (Gemini or OpenAI). Throws a readable error. */
 async function openLive(wantProvider, reason, direction, info) {
+  memory?.warm();   // start the memory helper now so the first recall question is fast
   const cfg = liveConfig();
   const provider = wantProvider || cfg.LIVE_PROVIDER || (cfg.GEMINI_API_KEY ? 'gemini' : cfg.OPENAI_API_KEY ? 'openai' : '');
   const apiKey = provider === 'openai' ? cfg.OPENAI_API_KEY : cfg.GEMINI_API_KEY;
@@ -134,6 +139,14 @@ function wireCall(active, n, { live, provider, mode, direction, reason, info }) 
       const ASYNC = process.env.ASYNC_TOOLS !== '0' && callInfo?.provider === 'gemini';   // non-blocking: the voice keeps talking while Hermes works, and several lookups run at the same time
       for (const c of calls) {
         if (c.name === 'hang_up') { live.sendToolResult(c.id, c.name, 'ok'); hangupWanted = Date.now(); continue; }
+        if (c.name === 'search_memory') {
+          const q = String(c.args?.query || ''); log('search_memory:', q.slice(0, 60));
+          const run = async () => { const t1 = Date.now(); const r = memory ? await memory.query({ op: 'search', query: q, limit: 4 }) : { ok: false, text: 'memory search is off; use ask_hermes' };
+            transcript.push({ t: since(), tag: '', text: '(searched memory: ' + q.slice(0, 80) + ' -> ' + (Date.now() - t1) + ' ms)' });
+            live.sendToolResult(c.id, c.name, r.ok ? r.text : r.text + '. Use ask_hermes instead.', ASYNC ? 'WHEN_IDLE' : undefined); };
+          if (ASYNC) void run(); else await run();
+          continue;
+        }
         if (c.name === 'ask_hermes') {
           const req = String(c.args?.request || ''); log('ask_hermes:', req.slice(0, 80)); const t1 = Date.now(); asking++; askingSince = t1;
           const note = (how) => { M.askHermes++; M.askMs.push(Date.now() - t1); asking = Math.max(0, asking - 1); askingSince = Date.now(); transcript.push({ t: since(), tag: '', text: '(asked Hermes: ' + req.slice(0, 120) + ' -> ' + how + (Date.now() - t1) + ' ms)' }); };
@@ -240,4 +253,4 @@ const server = http.createServer(async (req, res) => {
   } catch (e) { log('request failed:', e?.message || e); call = null; return json(res, 500, { error: String(e?.message || e) }); }
 });
 server.listen(PORT, '127.0.0.1', () => { log('callerd listening on 127.0.0.1:' + PORT); if (registered()) void startClient(null); });
-process.on('SIGTERM', () => { try { call?.end(); } catch {} setTimeout(() => { try { client?.disconnect(); } catch {} process.exit(0); }, 2000); });   // give the call a moment to save its transcript
+process.on('SIGTERM', () => { try { call?.end(); } catch {} memory?.stop(); setTimeout(() => { try { client?.disconnect(); } catch {} process.exit(0); }, 2000); });   // give the call a moment to save its transcript

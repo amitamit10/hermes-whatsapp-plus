@@ -2,6 +2,7 @@
 
 ## Unreleased
 ### Added
+- MemPalace support on calls: a `search_memory` voice tool backed by a read-only MemPalace helper (about 2 s per recall question), used before falling back to `ask_hermes`.
 - Non-blocking, parallel `ask_hermes` on calls: several things in one sentence run at the same time and each answer is spoken the moment it is ready (Gemini `NON_BLOCKING` tools); a second concurrent request uses its own side session so the two do not overwrite the chat session.
 - Voice calls: `whatsapp_call_me` tool, `call_mode` setting (`answer` / `callback`), and the `voice-call/` daemon (live Gemini voice,
   shared chat session, `ask_hermes`, post-call summary, transcripts with smoothness metrics).
