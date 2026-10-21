@@ -228,6 +228,7 @@ const server = http.createServer(async (req, res) => {
       if (n.length < 8) return json(res, 400, { error: 'to: digits with country code' });
       const dir = direction || (reason ? 'out' : 'back');   // out: Hermes calls for a reason; back: he called first and Hermes calls back
       let opened = null, info = null;
+      if (mode === 'live' && !callUsers().includes(n)) return json(res, 403, { error: 'the live voice (with the owner\'s memory and tools) is only for the owner number' });
       if (mode === 'live') { info = await getSessionInfo(n); try { opened = await openLive(wantProvider, reason, dir, info); } catch (e) { log('live connect failed:', e.message); return json(res, e.status || 502, { error: e.message }); } }
       try { call = await client.call(n, { audioSource: opened ? 'live' : (audioFile || 'silence'), durationMs: Number(durationMs) || (opened ? 600000 : 120000) }); }
       catch (e) { opened?.live.close(); call = null; log('call failed:', e?.message || e); return json(res, 502, { error: String(e?.message || e) }); }
