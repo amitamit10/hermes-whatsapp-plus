@@ -313,6 +313,21 @@ export class SignalingBridge {
         if (getBinaryNodeChild(voipChild, "enc")) {
             usableNode = await this.#maybeDecryptEnc(voipChild, senderDeviceJid);
         }
+        {
+            // patch: group offers AND the group_update messages WhatsApp sends during any call (someone rings or is added) list every member with a LID and a
+            // phone number (user_pn). The engine then adds a second, phone-number participant for the same person, fails to create the local audio stream
+            // ("No local audio stream" / INIT_MEDIA_STREAM_FAILED) and the call hangs on "reconnecting". Give it LIDs only.
+            const stripUserPn = (n) => {
+                if (!n || typeof n !== "object") return n;
+                let attrs = n.attrs, changed = false;
+                if (n.tag === "user" && attrs && "user_pn" in attrs) { attrs = Object.fromEntries(Object.entries(attrs).filter(([k]) => k !== "user_pn")); changed = true; }
+                let content = n.content;
+                if (Array.isArray(content)) { const nc = content.map(stripUserPn); if (nc.some((c, i) => c !== content[i])) { content = nc; changed = true; } }
+                return changed ? { ...n, attrs, content } : n;
+            };
+            const cleaned = stripUserPn(usableNode);
+            if (cleaned !== usableNode) { usableNode = cleaned; console.log("[caller] removed user_pn from the member list of a", String(usableNode.tag), "stanza"); }
+        }
         const b64 = Buffer.from(encodeBinaryNode(usableNode)).toString("base64");
         const storedPeerJid = callIdForRouting ? this.#incomingCallPeerById.get(callIdForRouting) : undefined;
         let mappedRemoteDeviceJid = callIdForRouting ? this.#remoteDevicePeerByCallId.get(callIdForRouting) : undefined;

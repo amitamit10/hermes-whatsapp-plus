@@ -274,21 +274,48 @@ export class VoipClient {
             try { // patch: an incoming offer becomes an ActiveCall the application can answer or ignore
                 const child = Array.isArray(node.content) ? node.content[0] : null;
                 console.log("[caller] call stanza:", child?.tag, "| id", String(child?.attrs?.["call-id"] ?? "").slice(0, 8), "| active", this.#activeCall ? "yes" : "no");
+                const describe = (n) => ({ tag: n.tag, attrs: n.attrs, kids: Array.isArray(n.content) ? n.content.map(describe) : (n.content ? "<" + (n.content.length || 0) + " bytes>" : undefined) });
+                if (child?.tag === "offer") console.log("[caller] offer stanza:", JSON.stringify({ callAttrs: node.attrs, offer: describe(child) }).slice(0, 9000));
+                else if (child && !["relaylatency"].includes(child.tag)) console.log("[caller] stanza detail:", JSON.stringify({ callAttrs: { from: node.attrs.from, participant: node.attrs.participant }, stanza: describe(child) }).slice(0, 1500));
                 if (child?.tag === "offer" && !this.#activeCall && this.#config.onIncomingCall) {
                     const callId = String(child.attrs["call-id"] ?? "");
                     const from = String(child.attrs["call-creator"] ?? node.attrs.from ?? "");
+                    // patch: group calls carry no relays in the offer; they have to be joined (joinVoipOngoingCall), not just accepted
+                    const kids = Array.isArray(child.content) ? child.content : [];
+                    const groupKid = kids.find((k) => /group|participant/i.test(String(k.tag)));
+                    const groupJid = String(child.attrs["group-jid"] ?? child.attrs.group_jid ?? groupKid?.attrs?.jid ?? groupKid?.attrs?.["group-jid"] ?? (String(node.attrs.from ?? "").endsWith("@g.us") ? node.attrs.from : "") ?? "");
+                    const isGroup = !!(groupJid || groupKid || Object.keys(child.attrs).some((k) => /group/i.test(k)));
                     const call = new ActiveCall(callId, this.#engine, 600000);
                     call._audioSource = "live";
                     call._incoming = true;
-                    call.answer = () => this.#engine.acceptCall(true, false);
+                    call._isGroup = isGroup;
+                    call.answer = () => {
+                        if (!isGroup || process.env.GROUP_JOIN !== "1") return this.#engine.acceptCall(true, false);   // GROUP_JOIN=1 tries joinVoipOngoingCall instead (it returned 670001)
+                        void (async () => {
+                            let meta = null; try { if (groupJid) meta = await this.#sock.groupMetadata(groupJid); } catch (e) { console.log("[caller] group metadata failed:", e?.message); }
+                            const parts = meta?.participants ?? [];
+                            const lids = parts.map((p) => String(p.lid ?? (String(p.id).endsWith("@lid") ? p.id : ""))).filter(Boolean);
+                            const pns = parts.map((p) => String(p.phoneNumber ?? (String(p.id).endsWith("@s.whatsapp.net") ? p.id : ""))).filter(Boolean);
+                            const o = { callId, callCreatorJid: from, initialPeerJid: from, participantsPn: pns, participantsLid: lids, participantsDevices: [], hasVideo: false, groupJid, chatName: meta?.subject ?? "", joinAndAccept: true };
+                            console.log("[caller] joining group call:", JSON.stringify({ callId: callId.slice(0, 8), groupJid, creator: from, pn: pns.length, lid: lids.length, subject: !!meta?.subject }));
+                            try { const r = this.#engine.joinOngoingCall(o); console.log("[caller] joinOngoingCall returned:", String(r)); }
+                            catch (e) { console.log("[caller] joinOngoingCall failed:", e?.name, e?.message, "- falling back to accept"); try { this.#engine.acceptCall(true, false); } catch { } }
+                        })();
+                    };
                     call.reject = () => { try { this.#engine.rejectCall(); } catch { } call._forceEnd("rejected"); };
                     call.once("ended", () => { if (this.#activeCall === call) this.#activeCall = null; });
                     this.#activeCall = call;
-                    this.#config.onIncomingCall(call, { callId, from });
+                    this.#config.onIncomingCall(call, { callId, from, isGroup, groupJid });
                 }
             }
             catch (e) { console.error("incoming call setup failed:", e?.message); }
             this.#signaling.processIncomingCall(node, this.#engine, this.#activeCall?.callId ?? "");
+            try { // patch: a reject/terminate for the active call ends it even if the engine never reports an end (a call-back refused as "busy" stayed "calling" forever)
+                const k = Array.isArray(node.content) ? node.content[0] : null;
+                const act = this.#activeCall;
+                if (act && k && (k.tag === "reject" || k.tag === "terminate") && String(k.attrs?.["call-id"] ?? "") === act.callId)
+                    setTimeout(() => { if (this.#activeCall === act) act._forceEnd(k.tag === "reject" ? "rejected_by_peer" : "terminated_by_peer"); }, 1500);
+            } catch { }
         });
         this.#sock.ws.on("CB:receipt", (node) => {
             if (!isCallReceiptNode(node))

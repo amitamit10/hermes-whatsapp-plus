@@ -576,7 +576,7 @@ CALL_CONTACT_SCHEMA = {
         "asks only what the task needs, never commits to anything and knows nothing private. When the call ends the owner automatically gets a short "
         "result, the transcript and the recording in this chat - you do not need to do anything afterwards. "
         "ONLY use it when the owner himself asks you to call someone, in a private chat with you. FIRST call it WITHOUT confirmed to get a preview (a one-time code is sent to his chat, you cannot see it); show the owner "
-        "who will be called, the exact task and what the voice may say about him, and wait for his clear yes AND the code he typed; only then call it again with the same arguments, confirmed=true and confirm_code. "
+        "who will be called, the exact task and what the voice may say about him, and wait for his clear yes AND the code he typed (the owner types the code back to you in this same chat, so you CAN receive it: never say you cannot, never skip the preview, and never ask him for the code before you have called the preview); only then call it again with the same arguments, confirmed=true and confirm_code. "
         "`to` = a phone number or a saved contact name. `purpose` = what to find out or say (one or two sentences, with every detail the voice needs: what, when, which item, "
         "what answer you want). `may_share` = the only facts about the owner it may mention (default: nothing beyond his name). `language` = he/en/th/... the person is most likely to speak."
     ),
@@ -678,8 +678,12 @@ def _errand_post(path, body):
     req = urllib.request.Request(os.environ.get("CALLERD_URL", "http://127.0.0.1:3100") + path, method="POST", data=json.dumps(body).encode(),
                                  headers={"x-callerd-key": ckey, "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=40):
-            return True, ""
+        with urllib.request.urlopen(req, timeout=40) as r:
+            try:
+                j = json.loads(r.read().decode() or "{}")
+            except Exception:
+                j = {}
+            return True, ("nocode" if j.get("code_required") is False else "")
     except urllib.error.HTTPError as e:
         try:
             msg = json.loads(e.read().decode()).get("error", "")
@@ -706,11 +710,17 @@ def _call_contact(args, **kwargs):
     body = {"to": number, "name": label or "", "purpose": purpose, "may_share": may_share, "language": language}
     code_in = re.sub(r"\D", "", str(args.get("confirm_code") or ""))
 
-    if not (args.get("confirmed") and code_in):
+    if not args.get("confirmed"):
         # Out-of-band confirmation: the call daemon sends the owner the FULL details and a one-time code in his private chat. You never see the code; he types it back.
         ok, err = _errand_post("/errand/preview", body)
         if not ok:
             return json.dumps({"success": False, "error": err})
+        if err == "nocode":
+            return json.dumps({"success": True, "needs_confirmation": True,
+                               "preview": {"calling": who, "number": "+" + number, "task": purpose, "may_share_about_owner": may_share or "(nothing beyond his name)", "language": language or "(whatever they speak)",
+                                           "note": "The voice will say it is an AI assistant calling for the owner and that the call is recorded. The recording and transcript are sent to him afterwards."},
+                               "instruction": "No code is needed. Show the owner these exact details (who, task, what may be shared) and ask for a clear yes. "
+                                              "Only after he says yes call whatsapp_call_contact again with exactly the same arguments and confirmed=true."})
         return json.dumps({"success": True, "needs_confirmation": True,
                            "preview": {"calling": who, "number": "+" + number, "task": purpose, "may_share_about_owner": may_share or "(nothing beyond his name)", "language": language or "(whatever they speak)",
                                        "note": "The voice will say it is an AI assistant calling for the owner and that the call is recorded. The recording and transcript are sent to him afterwards."},

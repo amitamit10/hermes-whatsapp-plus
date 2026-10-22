@@ -433,6 +433,17 @@ export class WasmEngine {
             tcToken?.delete?.();
         }
     };
+    /** patch: join an ongoing (group) call: the engine's joinVoipOngoingCall, which also fetches the relays a group offer does not carry */
+    joinOngoingCall = (o) => {
+        this.#ensureInitialized();
+        const pn = this.#makeStringList(o.participantsPn ?? []), lid = this.#makeStringList(o.participantsLid ?? []), dev = this.#makeStringList(o.participantsDevices ?? []);
+        try {
+            return this.#instance.joinVoipOngoingCall(String(o.callId), String(o.callCreatorJid), String(o.initialPeerJid), pn, lid, dev, !!o.hasVideo, String(o.groupJid || ""), Number(o.initialGroupTransactionId || 0), !!o.callCreatorIsNotContact, String(o.callLinkCode || ""), !!o.isLightweight, String(o.scheduledId || ""), o.joinAndAccept !== false, String(o.chatName || ""), Number(o.lobbyEntryType || 0), !!o.isDeviceSwitch);
+        }
+        finally {
+            pn.delete?.(); lid.delete?.(); dev.delete?.();
+        }
+    };
     /** patch: answer an incoming call (the WhatsApp Web worker calls acceptCall(isMicEnabled, isCameraEnabled)) */
     acceptCall = (mic = true, cam = false) => {
         this.#ensureInitialized();

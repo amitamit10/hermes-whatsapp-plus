@@ -60,7 +60,8 @@ import { createMemory } from './mempalace-link.mjs';
 import { createErrand, createConfirmations, errandInstructions, errandTools, errandLanguage } from './errand.mjs';
 const memory = process.env.MEMORY_SEARCH === '0' ? null : createMemory({ here: HERE, home: HOME, python: process.env.MEMPALACE_PYTHON || '/srv/media-ingest/hermes-service-home/hermes-agent-src/venv313/bin/python', log });
 const errandTimes = []; let errandBusy = false;
-const confirmations = createConfirmations({ send: (text) => link.postToChat(digits(liveConfig().OWNER_NUMBER), text) });
+const errandLast = new Map();
+const confirmations = createConfirmations({ codeRequired: () => !/^(0|off|no|false)$/i.test(String(liveConfig().ERRAND_CODE ?? '1')), send: (text) => link.postToChat(digits(liveConfig().OWNER_NUMBER), text) });
 const link = createHermesLink({ here: HERE, home: HOME, hermesApi: HERMES_API, hermesKey, bridgeUrl: process.env.BRIDGE_URL || 'http://127.0.0.1:3000', log,
   geminiKey: () => liveConfig().GEMINI_API_KEY || '', summaryModel: () => liveConfig().SUMMARY_MODEL || 'gemini-flash-latest' });
 const { getSessionInfo, askHermes, askHermesBounded, postCallSummary, instructionsFor } = link;
@@ -90,7 +91,7 @@ function wireCall(active, n, { live, provider, mode, direction, reason, info }) 
   let frames = 0, energy = 0, connected = false;
   const transcript = [];                                   // { t (ms since the call started), tag, text }
   const M = { respDelays: [], interruptions: 0, stalls: 0, askHermes: 0, askMs: [] };   // "was it smooth?" numbers
-  let lastUserAt = 0, lastAudioAt = 0, turnStart = 0, hangupWanted = 0, asking = 0, askingSince = 0;
+  let lastFrameAt = 0, connectedSince = 0, lastUserAt = 0, lastAudioAt = 0, turnStart = 0, hangupWanted = 0, asking = 0, askingSince = 0;
   callInfo = { to: n, status: active._incoming ? 'ringing' : 'calling', mode: mode || 'file', provider, dir: direction === 'in' ? 'in' : 'out', startedAt: Date.now(), frames: 0, heardRms: 0, reason: null, turns: 0 };
   const since = () => Date.now() - callInfo.startedAt;
   const plain = () => transcript.map((e) => e.tag + e.text);
@@ -114,13 +115,14 @@ function wireCall(active, n, { live, provider, mode, direction, reason, info }) 
     if (live) void postCallSummary(info, plain(), (Date.now() - callInfo.startedAt) / 1000, n);
   };
   active.on('ringing', () => { callInfo.status = 'ringing'; log('ringing'); });
+  if (!active._incoming) setTimeout(() => { if (!connected && callInfo.status !== 'ended' && call === active) { log('no answer after 70 s: giving up'); try { active.end(); } catch {} setTimeout(() => active._forceEnd('no_answer'), 1500); } }, 70000);   // an unanswered outbound call must not block the next one
   active.on('connected', () => {
-    callInfo.status = 'connected'; connected = true; log('connected (' + (active._incoming ? 'answered' : 'call answered') + ')');
+    callInfo.status = 'connected'; connected = true; connectedSince = Date.now(); log('connected (' + (active._incoming ? 'answered' : 'call answered') + ')');
     live?.sendText(direction === 'in' ? 'The call just connected: he called you and you answered. Say a short hello now (in Hebrew) and ask what he needs.'
       : 'The call just connected and he answered. Say a short hello now (in Hebrew) and ' + (direction === 'out' ? 'tell him why you are calling.' : 'ask what he needs.'));
   });
   active.on('audio', (pcm) => {
-    frames++; let e = 0; for (let i = 0; i < pcm.length; i++) e += pcm[i] * pcm[i]; energy = Math.max(energy, Math.sqrt(e / pcm.length));
+    frames++; lastFrameAt = Date.now(); let e = 0; for (let i = 0; i < pcm.length; i++) e += pcm[i] * pcm[i]; energy = Math.max(energy, Math.sqrt(e / pcm.length));
     callInfo.frames = frames; callInfo.heardRms = Number(energy.toFixed(4));
     if (live && connected) live.sendAudio(pcm);
   });
@@ -180,6 +182,7 @@ function wireCall(active, n, { live, provider, mode, direction, reason, info }) 
       const now = Date.now();
       if (hangupWanted && active.queuedMs < 30 && now - lastAudioAt > 1200 && now - hangupWanted > 1500) { log('hanging up after the goodbye'); clearInterval(watch); active.end(); setTimeout(() => active._forceEnd('goodbye'), 1500); return; }
       if (hangupWanted && now - hangupWanted > 15000) { clearInterval(watch); active.end(); setTimeout(() => active._forceEnd('goodbye'), 1500); return; }
+      if (callInfo?.status === 'connected' && now - Math.max(lastFrameAt, connectedSince) > 25000) { log('no audio from the caller for 25 s: the call is stuck, hanging up'); clearInterval(watch); active.end(); setTimeout(() => active._forceEnd('no_audio'), 1500); return; }
       if (callInfo?.status === 'connected' && now - callInfo.startedAt > MAX_MS) { log('call length cap reached'); clearInterval(watch); active.end(); setTimeout(() => active._forceEnd('max_length'), 1500); return; }
       const quietSince = Math.max(lastUserAt || 0, lastAudioAt || 0, askingSince || 0, callInfo?.startedAt || 0);
       if (callInfo?.status === 'connected' && !asking && now - quietSince > SILENCE_MS) { log('hanging up after a long silence'); clearInterval(watch); active.end(); setTimeout(() => active._forceEnd('silence'), 1500); }
@@ -190,6 +193,7 @@ function wireCall(active, n, { live, provider, mode, direction, reason, info }) 
 
 /** An incoming call: answer it with the live voice if it is the owner and call_mode is "answer"; otherwise leave it alone. */
 async function handleIncoming(incoming, meta) {
+  if (meta.isGroup) log('this is a GROUP call (' + (meta.groupJid || 'group id unknown') + ')');
   const from = lidToPhone(meta.from);
   const mode = waSettings().call_mode === 'answer' ? 'answer' : 'callback';
   log('incoming call from', from.slice(0, 3) + '…' + from.slice(-2), '| mode', mode);
@@ -198,12 +202,12 @@ async function handleIncoming(incoming, meta) {
   call = incoming;
   let opened = null;
   const info = await getSessionInfo(from);
-  try { opened = await openLive(null, '', 'in', info); }
+  try { opened = await openLive(null, meta.isGroup ? 'This is a GROUP call: more than one person may be on the line, he started it. Greet everyone, keep answers short, and say who you are answering when it matters' : '', 'in', info); }
   catch (e) { log('cannot answer, live voice unavailable:', e.message); call = null; incoming._forceEnd('ignored'); return; }
   wireCall(incoming, from, { live: opened.live, provider: opened.provider, mode: 'live', direction: 'in', reason: '', info });
   const t0 = Date.now();
   while (incoming.state !== 3 && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 100)); // wait for the engine to know it is ringing
-  setTimeout(() => { if (call === incoming && callInfo?.status !== 'connected') { log('answer did not connect in time; releasing the call so the call-back fallback can run'); try { incoming.reject(); } catch { incoming._forceEnd('answer_timeout'); } } }, 8000);
+  setTimeout(() => { if (call === incoming && callInfo?.status !== 'connected') { log('answer did not connect in time; releasing the call so the call-back fallback can run'); try { incoming.reject(); } catch { incoming._forceEnd('answer_timeout'); } } }, meta.isGroup ? 9500 : 8000);
   try { incoming.answer(); log('answer sent after', Date.now() - t0, 'ms; engine state', incoming.state); }
   catch (e) { log('answer failed:', e?.message || e); incoming._forceEnd('answer_failed'); }
 }
@@ -250,8 +254,11 @@ const server = http.createServer(async (req, res) => {
       if (purpose.length < 8) return json(res, 400, { error: 'purpose: say what the call is for' });
       const lang = errandLanguage(b.language);
       const brief = { n, name: String(b.name || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60), purpose, mayShare: String(b.may_share || '').replace(/\s+/g, ' ').trim().slice(0, 500), language: String(b.language || '').toLowerCase().slice(0, 2), ownerName: cfg.OWNER_NAME || 'the owner' };
-      if (url.pathname === '/errand/preview') { const r = await confirmations.preview(brief); return json(res, r.ok ? 200 : r.status, r.ok ? { ok: true } : { error: r.error }); }
+      if (url.pathname === '/errand/preview') { const r = await confirmations.preview(brief); return json(res, r.ok ? 200 : r.status, r.ok ? { ok: true, code_required: r.codeRequired !== false } : { error: r.error }); }
       if (call || errandBusy) return json(res, 409, { error: 'a call is already active' });
+      // guardrails that do not depend on anyone's approval: never emergency/premium/toll numbers, never our own number, no re-dialling the same number within 5 minutes
+      if (/^(972)?(1(00|01|02|03|04|06|12)|911|999)$/.test(n) || /^972(1700|1800|1900|19\d)/.test(n) || (digits(cfg.BOT_NUMBER) && n === digits(cfg.BOT_NUMBER))) return json(res, 403, { error: 'this number cannot be called by the assistant (emergency, premium, toll-free or its own number)' });
+      if (Date.now() - (errandLast.get(n) || 0) < 300000) return json(res, 429, { error: 'this number was called less than 5 minutes ago; wait or call it yourself' });
       const chk = confirmations.verify(brief, b.code);
       if (!chk.ok) return json(res, chk.status, { error: chk.error });
       const perHour = Number(cfg.ERRAND_PER_HOUR) || 4, now = Date.now();
@@ -265,7 +272,8 @@ const server = http.createServer(async (req, res) => {
       const maxMin = Number(cfg.ERRAND_MAX_MIN) || 6;
       try { call = await client.call(n, { audioSource: 'live', durationMs: (maxMin + 2) * 60000 }); }
       catch (e) { opened.live.close(); release(); log('errand: call failed:', e.message); return json(res, 502, { error: String(e.message || e).slice(0, 160) }); }
-      errandBusy = false;
+      errandBusy = false; errandLast.set(n, Date.now());
+      void link.postToChat(owner, '\u{1F4DE} \u05de\u05ea\u05e7\u05e9\u05e8 \u05e2\u05db\u05e9\u05d9\u05d5 \u05d0\u05dc ' + (brief.name ? brief.name + ' ' : '') + '(+' + n + ') \u2014 ' + brief.purpose.slice(0, 200));   // transparency: the owner always sees when a call starts
       const active = call;
       const ownerInfo = null;   // the report is a tool-less summary: no owner session context is needed or used
       errand.wire(active, n, brief, opened, { setInfo: (i) => { callInfo = i; }, onEnd: () => { if (call === active) call = null; }, info: ownerInfo, owner, maxMs: maxMin * 60000 });
