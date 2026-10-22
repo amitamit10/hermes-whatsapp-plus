@@ -94,8 +94,10 @@ export function createErrand({ log, home, link, ringMs = 45000, maxMs = 6 * 6000
       if (ended) return; ended = true; clearInterval(watch); clearTimeout(ringTimer);
       info.status = 'ended'; info.reason = why; info.endedAt = Date.now(); live?.close(); onEnd?.();
       const seconds = connectedAt ? Math.round((Date.now() - connectedAt) / 1000) : 0;
-      const said = transcript.filter((e) => e.who === 'Hermes').map((e) => e.text).join(' ');
-      const disclosed = !connectedAt || (/AI|assistant|\u05e2\u05d5\u05d6\u05e8|\u05d5\u05d9\u05e8\u05d8\u05d5\u05d0\u05dc|\u0e1c\u0e39\u0e49\u0e0a\u0e48\u0e27\u0e22/i.test(said) && /record|\u05de\u05d5\u05e7\u05dc\u05d8|\u05d4\u05e7\u05dc\u05d8|\u05de\u05ea\u05d5\u05dc\u05dc|\u0e1a\u0e31\u0e19\u0e17\u0e36\u0e01/i.test(said));   // guardrail: was the AI + recording disclosure really spoken?
+      const said = transcript.filter((e) => e.who === 'Hermes').slice(0, 3).map((e) => e.text).join(' ');   // only Hermes's first lines count: the disclosure has to come at the start
+      const isAI = /(^|[^A-Za-z])(AI|A\.I\.)([^A-Za-z]|$)|artificial intelligence|virtual assistant|AI assistant|\u05d1\u05d9\u05e0\u05d4 \u05de\u05dc\u05d0\u05db\u05d5\u05ea\u05d9\u05ea|\u05d5\u05d9\u05e8\u05d8\u05d5\u05d0\u05dc(\u05d9|\u05ea)?|\u0e1c\u0e39\u0e49\u0e0a\u0e48\u0e27\u0e22 AI/i.test(said);
+      const isRec = /(^|[^A-Za-z])(record(ed|ing)?|transcribed)([^A-Za-z]|$)|\u05de\u05d5\u05e7\u05dc\u05d8\u05ea?|\u05de\u05d5\u05e7\u05dc\u05d8\u05d9\u05dd|\u05de\u05ea\u05d5\u05dc\u05dc\u05ea?|\u0e1a\u0e31\u0e19\u0e17\u0e36\u0e01/i.test(said);
+      const disclosed = !connectedAt || (isAI && isRec);   // guardrail (warning only): were the AI + recording disclosures really spoken at the start?
       log('errand ended:', why, '| talk time', seconds, 's | lines', transcript.length, disclosed ? '' : '| DISCLOSURE NOT DETECTED');
       const stamp = new Date(info.startedAt).toISOString().replace(/[:.]/g, '-');
       try {
