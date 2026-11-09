@@ -67,7 +67,7 @@ const link = createHermesLink({ here: HERE, home: HOME, hermesApi: HERMES_API, h
 const { getSessionInfo, askHermes, askHermesBounded, postCallSummary, instructionsFor } = link;
 
 const errand = createErrand({ log, home: HOME, link });
-let retries = 0;
+let retries = 0, reconnectTimer = null, clientGeneration = 0;
 let client = null, state = 'idle', pairingCode = null, error = null, call = null, callInfo = null;
 const registered = () => existsSync(path.join(AUTH, 'creds.json')) && JSON.parse(readFileSync(path.join(AUTH, 'creds.json'), 'utf8')).registered === true;
 
@@ -212,16 +212,50 @@ async function handleIncoming(incoming, meta) {
   catch (e) { log('answer failed:', e?.message || e); incoming._forceEnd('answer_failed'); }
 }
 
+function scheduleReconnect() {
+  if (reconnectTimer || !registered()) return;
+  const wait = Math.min(60000, 15000 * (++retries));
+  log('retrying the WhatsApp connection in', wait / 1000, 's');
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (registered() && !client) void startClient(null);
+  }, wait);
+}
+
+function handleConnectionLost(instance, generation) {
+  if (client !== instance || clientGeneration !== generation) return;
+  state = 'connecting';
+  error = 'WhatsApp socket closed; reconnecting';
+  log('WhatsApp socket closed after ready; reconnecting');
+  if (call) { try { call._forceEnd('connection_lost'); } catch {} call = null; }
+  client = null;
+  clientGeneration += 1;
+  try { instance.disconnect(); } catch {}
+  scheduleReconnect();
+}
+
 async function startClient(pairingPhone) {
   if (client) return;
   state = pairingPhone ? 'pairing' : 'connecting'; error = null;
-  client = new VoipClient({ authDir: AUTH, pairingPhone,
+  const generation = ++clientGeneration;
+  let instance;
+  instance = new VoipClient({ authDir: AUTH, pairingPhone,
     onPairingCode: (code, err) => { if (err) { error = 'pairing: ' + err.message; log('pairing error', err.message); } else { pairingCode = code; log('PAIRING CODE issued'); } },
+    onConnectionLost: () => handleConnectionLost(instance, generation),
     onIncomingCall: (c, info) => { void handleIncoming(c, info); } });
-  try { await client.connect(); state = 'ready'; pairingCode = null; retries = 0; log('connected, ready'); }
+  client = instance;
+  try {
+    await instance.connect();
+    if (client !== instance || clientGeneration !== generation) { try { instance.disconnect(); } catch {} return; }
+    state = 'ready'; pairingCode = null; retries = 0; log('connected, ready');
+  }
   catch (e) {
-    error = String(e?.message || e); state = 'idle'; log('connect failed:', error); try { client.disconnect(); } catch {} client = null;
-    if (registered() && !pairingPhone) { const wait = Math.min(60000, 15000 * (++retries)); log('retrying the WhatsApp connection in', wait / 1000, 's'); setTimeout(() => { void startClient(null); }, wait); }
+    if (client !== instance || clientGeneration !== generation) { try { instance.disconnect(); } catch {} return; }
+    error = String(e?.message || e); state = 'idle'; log('connect failed:', error);
+    try { instance.disconnect(); } catch {}
+    client = null;
+    clientGeneration += 1;
+    if (registered() && !pairingPhone) scheduleReconnect();
   }
 }
 
