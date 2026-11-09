@@ -81,13 +81,21 @@ def ensure_bridge(stock_dir: Path) -> bool:
         if not (n.endswith((".js", ".mjs")) or n in ("package.json", "package-lock.json", "node_modules")):
             continue
         link = BRIDGE_DIR / n
-        if link.is_symlink() and os.readlink(link) == str(p):
-            continue
+        if link.is_file() and not link.is_symlink():
+            try:
+                if link.read_bytes() == p.read_bytes():
+                    continue
+            except OSError:
+                pass
         if link.is_dir() and not link.is_symlink():
-            continue  # a real directory (e.g. node_modules installed by hand or by the launcher): leave it alone
+            continue
         if link.is_symlink() or link.exists():
             link.unlink()
-        link.symlink_to(p)
+        import shutil
+        if p.is_dir():
+            shutil.copytree(p, link)
+        else:
+            shutil.copy2(p, link)
     if hooked:
         try:
             (Path(os.environ.get("HERMES_HOME", "/opt/data")) / "state" / "whatsapp_plus_alert.txt").unlink()

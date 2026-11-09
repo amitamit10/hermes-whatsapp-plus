@@ -22,7 +22,7 @@ for sid, in src.execute("SELECT id FROM sessions WHERE source='whatsapp' AND cha
         if m:
             who = (m.group(1), m.group(2)); break
     if not who:
-        continue  # a person with a normal chat (owner/limited user/...), not an outside contact
+        continue  # a person with a normal chat (owner/Ori/...), not an outside contact
     nm, num = who
     names[num] = nm
     jid = num + "@s.whatsapp.net"

@@ -179,7 +179,7 @@ def main():
         if not question or len(options) < 2 or len(options) > 12 or any(not o for o in options) or len({o.lower() for o in options}) != len(options):
             sys.exit("ERROR: a poll needs a question and 2-12 distinct, non-empty options")
         if recent() >= MAX_PER_HOUR:
-            sys.exit("ERROR: rate limit (%d messages/hour) reached - tell the owner" % MAX_PER_HOUR)
+            sys.exit("ERROR: rate limit (%d messages/hour) reached - tell Amit" % MAX_PER_HOUR)
         r = post("/send-poll", {"chatId": to, "question": question, "options": options, "selectableCount": len(options) if multi else 1})
         os.makedirs(STATE, exist_ok=True)
         with open(LOG, "a") as f:
@@ -235,9 +235,9 @@ def main():
     if to.endswith("@s.whatsapp.net") and num not in known and label is None:
         fresh = [k for k, v in known.items() if float(v) > time.time() - 86400]
         if len(fresh) >= NEW_PER_DAY:
-            sys.exit("ERROR: new-number limit reached (%d new numbers per 24h, WhatsApp ban protection) - tell the owner" % NEW_PER_DAY)
+            sys.exit("ERROR: new-number limit reached (%d new numbers per 24h, WhatsApp ban protection) - tell Amit" % NEW_PER_DAY)
     if recent() >= MAX_PER_HOUR:
-        sys.exit("ERROR: rate limit (%d messages/hour) reached - tell the owner" % MAX_PER_HOUR)
+        sys.exit("ERROR: rate limit (%d messages/hour) reached - tell Amit" % MAX_PER_HOUR)
     time.sleep(random.uniform(2, 6))  # human-like pacing
     try:
         if path:

@@ -4,7 +4,8 @@ description: >
   WhatsApp Plus - extends the stock WhatsApp platform by subclassing the adapter (group history + context, owner-only triggering
   in groups, mute/bot list, temporary contacts, reactions, runtime settings) with a forked Node bridge selected via
   platforms.whatsapp.extra.bridge_script, plus the whatsapp_* tools. Lives outside the Hermes source tree.
-author: amitamit10
+author: amit
+requires_hermes: ">=0.21.0"
 requires_plugins:
   - whatsapp-platform
 provides_tools:
@@ -23,3 +24,7 @@ provides_tools:
   - whatsapp_campaign
   - whatsapp_call_me
   - whatsapp_call_contact
+provides_hooks:
+  - post_llm_call
+  - pre_llm_call
+  - pre_tool_call
